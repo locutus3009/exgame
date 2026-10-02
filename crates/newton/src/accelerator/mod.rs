@@ -21,9 +21,9 @@ use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender};
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 use std::thread::{self, JoinHandle};
 use tokio::sync::Semaphore;
 use vulkano::{
@@ -176,71 +176,98 @@ struct Quiescence {
 }
 
 /// One producer of an epoch: a future the accelerator counts as active until
-/// it completes (or is dropped), and as parked whenever its last poll returned
-/// `Pending`.
+/// it completes (or is dropped), and as parked from the moment its poll returns
+/// `Pending` until it is WOKEN — not until it is next polled. A combinator
+/// such as `join_all` re-polls every member whenever any of them wakes, so a
+/// producer whose result already arrived would otherwise still look parked
+/// while its siblings run, and the count would meet early.
 ///
 /// A producer that is pending on something other than a submission (a
 /// contended lock, say) counts as parked too. The worst that costs is one
-/// early flush; it can never hold a batch back, because it cannot make the
-/// counts meet while a producer is still running.
-struct Producer<'a, F: Future> {
-    tx: &'a Sender<Message>,
-    q: &'a Quiescence,
+/// early flush; it can never hold a batch back, because the counts cannot
+/// meet while a producer is runnable.
+struct Producer<F: Future> {
+    tx: Sender<Message>,
+    state: Arc<ProducerWaker>,
     fut: Pin<Box<F>>,
-    parked: bool,
     done: bool,
 }
 
-impl<F: Future> Producer<'_, F> {
+/// The waker a producer's future is polled with: it unparks the producer,
+/// then wakes whatever polls the producer.
+struct ProducerWaker {
+    q: Arc<Quiescence>,
+    parked: AtomicBool,
+    outer: futures::task::AtomicWaker,
+}
+
+impl ProducerWaker {
+    fn unpark(&self) {
+        if self.parked.swap(false, Ordering::SeqCst) {
+            self.q.parked.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+}
+
+impl std::task::Wake for ProducerWaker {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.unpark();
+        self.outer.wake();
+    }
+}
+
+impl<F: Future> Producer<F> {
     /// Ask for a flush if every active producer is parked, counting from a
     /// value just observed.
     fn flush_if_quiescent(&self, parked: usize) {
-        if parked == self.q.active.load(Ordering::SeqCst) {
+        if parked == self.state.q.active.load(Ordering::SeqCst) {
             // A dead worker answers every job with `WorkerGone` by dropping
             // its senders; there is nothing to report here.
             let _ = self.tx.send(Message::Quiescent);
         }
     }
 
-    fn unpark(&mut self) {
-        if self.parked {
-            self.parked = false;
-            self.q.parked.fetch_sub(1, Ordering::SeqCst);
-        }
-    }
-
     fn finish(&mut self) {
-        self.unpark();
+        self.state.unpark();
         if !self.done {
             self.done = true;
-            self.q.active.fetch_sub(1, Ordering::SeqCst);
-            self.flush_if_quiescent(self.q.parked.load(Ordering::SeqCst));
+            self.state.q.active.fetch_sub(1, Ordering::SeqCst);
+            self.flush_if_quiescent(self.state.q.parked.load(Ordering::SeqCst));
         }
     }
 }
 
-impl<F: Future> Future for Producer<'_, F> {
+impl<F: Future> Future for Producer<F> {
     type Output = F::Output;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
         let this = &mut *self;
-        this.unpark();
-        match this.fut.as_mut().poll(cx) {
+        // Polled at all means runnable: a wake that raced the last poll's
+        // `Pending` left the producer counted as parked.
+        this.state.unpark();
+        this.state.outer.register(cx.waker());
+        let waker = Waker::from(this.state.clone());
+        match this.fut.as_mut().poll(&mut Context::from_waker(&waker)) {
             Poll::Ready(out) => {
                 this.finish();
                 Poll::Ready(out)
             }
             Poll::Pending => {
-                this.parked = true;
-                let parked = this.q.parked.fetch_add(1, Ordering::SeqCst) + 1;
-                this.flush_if_quiescent(parked);
+                if !this.state.parked.swap(true, Ordering::SeqCst) {
+                    let parked = this.state.q.parked.fetch_add(1, Ordering::SeqCst) + 1;
+                    this.flush_if_quiescent(parked);
+                }
                 Poll::Pending
             }
         }
     }
 }
 
-impl<F: Future> Drop for Producer<'_, F> {
+impl<F: Future> Drop for Producer<F> {
     /// A producer dropped before it completed (its epoch was cancelled) leaves
     /// the count, so the others are not held back waiting for it.
     fn drop(&mut self) {
@@ -574,12 +601,14 @@ impl<T: Scalar + StandardPart + PartialOrd + Lift<T> + Pod> Accelerator<T> {
         self.quiescence
             .active
             .fetch_add(producers.len(), Ordering::SeqCst);
-        let q = &*self.quiescence;
         let producers = producers.into_iter().map(|f| Producer {
-            tx: &self.tx,
-            q,
+            tx: self.tx.clone(),
+            state: Arc::new(ProducerWaker {
+                q: self.quiescence.clone(),
+                parked: AtomicBool::new(false),
+                outer: futures::task::AtomicWaker::new(),
+            }),
             fut: Box::pin(f),
-            parked: false,
             done: false,
         });
         join_all(producers).await
