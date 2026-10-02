@@ -1,11 +1,11 @@
 # Game Experiment live project state
 
 Generated from local Git and GitHub. Do not edit. Heads are the newest commit that
-changed anything outside `coordination/`, so state commits do not move them.
+changed anything but coordination state, so state commits do not move them.
 
-- Product remote main: `5dc5d8c657d54d7eab9a0d71d9716a8eb866ec4e`
-- Local origin/main: `5dc5d8c657d54d7eab9a0d71d9716a8eb866ec4e`
-- Primary worktree head: `5dc5d8c657d54d7eab9a0d71d9716a8eb866ec4e`
+- Product remote main: `3ccdec0dd37311b5bf8148988e2a57aaab3df76b`
+- Local origin/main: `3ccdec0dd37311b5bf8148988e2a57aaab3df76b`
+- Primary worktree head: `3ccdec0dd37311b5bf8148988e2a57aaab3df76b`
 
 ## Open pull requests
 
