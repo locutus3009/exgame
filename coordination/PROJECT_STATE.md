@@ -3,9 +3,9 @@
 Generated from local Git and GitHub. Do not edit. Heads are the newest commit that
 changed anything but coordination state, so state commits do not move them.
 
-- Product remote main: `4a6a860dd8cc1c4deb6e87fe7a99c6e4c27d4b4d`
-- Local origin/main: `4a6a860dd8cc1c4deb6e87fe7a99c6e4c27d4b4d`
-- Primary worktree head: `4a6a860dd8cc1c4deb6e87fe7a99c6e4c27d4b4d`
+- Product remote main: `1ae59151204ee4c16a559206433f5507ac63b06c`
+- Local origin/main: `1ae59151204ee4c16a559206433f5507ac63b06c`
+- Primary worktree head: `1ae59151204ee4c16a559206433f5507ac63b06c`
 
 ## Open pull requests
 
