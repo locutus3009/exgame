@@ -3,11 +3,11 @@
 This file is generated. Read `README.md`, then use `tools/handoffctl snapshot`.
 Never edit this file directly.
 
-## In Progress
+## In Review
 
 | Priority | Task | Summary | Next action | Owner |
 | --- | --- | --- | --- | --- |
-| P3 | [AR-0107](tasks/AR-0107.md): Precision seam: measure f32 base poses far from the origin | The shaders bind Motor<f32> base poses directly; ACCELERATOR.md Part V calls the precision of that narrowing unexamined. Islands re-anchor at their centre of mass; measure whether that suffices. | Claim; write a test that steps the same mechanism at the origin and translated far away and compares relative motion. | worker-ar0107 |
+| P3 | [AR-0107](tasks/AR-0107.md): Precision seam: measure f32 base poses far from the origin | The shaders bind Motor<f32> base poses directly; ACCELERATOR.md Part V calls the precision of that narrowing unexamined. Islands re-anchor at their centre of mass; measure whether that suffices. | Claim; write a test that steps the same mechanism at the origin and translated far away and compares relative motion. | Submitted by worker-ar0107 |
 
 ## Planned
 
