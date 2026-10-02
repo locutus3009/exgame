@@ -2,7 +2,7 @@
 
 //! Hanging cloth grids: NUM_CURTAINS uniform COLS×ROWS mass-spring curtains
 //! (each COLS = N wide, ROWS = 2N tall, square cells), each an independent
-//! Mechanism sharing one Accelerator and stepped together via join_all. Pinned
+//! Mechanism sharing one Accelerator and stepped together by one Driver. Pinned
 //! along a kinematic top row, hanging under a uniform gravity field, kicked by a
 //! one-off +Y "wind gust". Newton implicit integrator on the Fix+f32 substrate.
 //! Plain orbit camera (drag = orbit, scroll = zoom). Run:
@@ -11,14 +11,13 @@
 use aristotle::{Epoch, World, WorldId};
 use async_trait::async_trait;
 use clifford::pga3::Twist;
-use futures::future::join_all;
 use joints::{AxialSpringDamper, Joint, SimpleSpringDamper};
 use melies::winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use melies::{
     CircleInstance, CircleRenderer, Config, Example, Frame, Gpu, LineInstance, LineRenderer,
 };
 use newton::{
-    Accelerator, Inert, Inertia, Mechanism, RigidBody,
+    Accelerator, Driver, Inert, Inertia, Mechanism, RigidBody,
     field::UniformField,
     integrator::{ImplicitIntegrator, Newton},
 };
@@ -45,7 +44,7 @@ const SEED: u64 = 0x5EED_1234_ABCD_0001;
 const MAX_DT: f32 = 0.10; // fixed max sim step per rendered frame
 
 // ── Scene layout ─────────────────────────────────────────────────────────────
-const NUM_CURTAINS: usize = 2; // each its own Mechanism, stepped together via join_all
+const NUM_CURTAINS: usize = 2; // each its own Mechanism, stepped together by one Driver
 const WIDTH: f32 = 0.5; // physical width along X; uniform cell size h = WIDTH/(COLS-1)
 const GAP: f32 = 1.0; // clear distance between neighbouring curtains along X
 
@@ -170,7 +169,7 @@ fn normalize(v: Vector3<f32>) -> Vector3<f32> {
 // ── Demo state ───────────────────────────────────────────────────────────────
 /// One curtain = its own `Mechanism` plus the id bookkeeping to draw it.
 struct Curtain {
-    mech: Mechanism<f32, Fx>,
+    mech: Arc<Mechanism<f32, Fx>>,
     nodes: Vec<(WorldId, bool)>, // (id, is_kinematic) — for drawing/colour
     springs: Vec<(WorldId, WorldId)>, // endpoint id pairs — for drawing
 }
@@ -179,6 +178,8 @@ struct Cloth {
     max_dt: f32,
     last: Instant,
     curtains: Vec<Curtain>,
+    /// Steps every curtain's mechanism as one epoch.
+    driver: Driver<f32, Fx>,
     circles: CircleRenderer,
     lines: LineRenderer,
     orbit: OrbitCamera,
@@ -297,7 +298,7 @@ async fn build_curtain(
         .collect();
 
     Curtain {
-        mech,
+        mech: Arc::new(mech),
         nodes,
         springs,
     }
@@ -342,8 +343,14 @@ impl Example for Cloth {
             .collect();
 
         let mut curtains: Vec<Curtain> = Vec::new();
+        let mut driver = Driver::new(accel.clone());
         for t in tmp {
-            curtains.push(t.await);
+            let curtain = t.await;
+            driver
+                .add(curtain.mech.clone())
+                .await
+                .expect("every curtain shares the one accelerator");
+            curtains.push(curtain);
         }
 
         // Instance buffers sized for ALL curtains: COLS·ROWS nodes + all springs each.
@@ -358,6 +365,7 @@ impl Example for Cloth {
             max_dt: MAX_DT,
             last,
             curtains,
+            driver,
             circles: CircleRenderer::with_capacity(gpu.device(), gpu.surface_format(), circle_cap),
             lines: LineRenderer::with_capacity(gpu.device(), gpu.surface_format(), line_cap),
             orbit: OrbitCamera::new(),
@@ -398,20 +406,12 @@ impl Example for Cloth {
 
     async fn render(&mut self, frame: &mut Frame<'_>) {
         // --- One fixed sim step, ALL curtains together. Each is an independent
-        // mechanism; join_all keeps both dispatches in flight so the shared
-        // accelerator batches their kernels in parallel (cooperative on this
-        // thread, parallel in the accelerator's rayon pool). ---
+        // mechanism; the driver steps them as one epoch, so the shared
+        // accelerator batches their kernels and flushes once all are parked. ---
         let dt = self.tick();
 
         let epoch = Epoch::standalone(dt, 1.0);
-        let futs: Vec<_> = self
-            .curtains
-            .iter()
-            .map(|cu| cu.mech.step(&epoch))
-            .collect();
-        for r in join_all(futs).await {
-            r.unwrap();
-        }
+        self.driver.step(&epoch).await.unwrap();
 
         let proj = self.orbit.projector();
 

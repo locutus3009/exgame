@@ -4,6 +4,7 @@ pub use indexmap;
 
 mod accelerator;
 mod body;
+mod driver;
 mod error;
 pub mod field;
 pub mod gravity;
@@ -13,8 +14,9 @@ mod mechanism;
 
 pub use accelerator::Accelerator;
 pub use body::{GatherTerm, RigidBody};
+pub use driver::Driver;
 pub use error::EvalError;
 pub use field::UniformField;
 pub use inertia::{AngularKeys, Inertia, InertiaKeys};
 pub use integrator::Integrator;
-pub use mechanism::{Component, Entity, ForceField, Inert, Mechanism};
+pub use mechanism::{Component, Entity, ForceField, Inert, Mechanism, StructureError};

@@ -10,7 +10,7 @@ use melies::{
     CircleInstance, CircleRenderer, Config, Example, Frame, Gpu, LineInstance, LineRenderer,
 };
 use newton::{
-    Accelerator, Inert, Mechanism, RigidBody, gravity::GravityPropagator,
+    Accelerator, Driver, Inert, Mechanism, RigidBody, gravity::GravityPropagator,
     integrator::ImplicitIntegrator,
 };
 use peano::fixed::{Fix, types::I96F32};
@@ -189,8 +189,9 @@ struct Simple {
     lines: LineRenderer,
     prop: Arc<GravityPropagator<f32, Fx>>,
     mech: Arc<Mechanism<f32, Fx>>,
-    camera_mech: Arc<Mechanism<f32, Fx>>,
     body_id: WorldId,
+    /// Steps `mech`, `mech_b` and the camera as one epoch.
+    driver: Driver<f32, Fx>,
 
     // Second, non-gravitating body in its own mechanism. The camera tracks a
     // mechanism's centroid, so a separate mechanism is what lets us flip the
@@ -258,11 +259,22 @@ impl Example for Simple {
         let cameras = Arc::new(CameraField::new(world.clone(), prop.clone()));
         let (camera_id, camera_mech) = cameras.clone().add_camera(mech.clone(), 2.0, 1.0).await;
 
+        // The camera mechanism is built on its target's accelerator, so all
+        // three share the one accelerator the driver requires.
+        let mut driver = Driver::new(accelerator.clone());
+        for m in [&mech, &mech_b, &camera_mech] {
+            driver
+                .add(m.clone())
+                .await
+                .expect("every mechanism shares the one accelerator");
+        }
+
         let last = Instant::now();
         let circles = CircleRenderer::new(gpu.device(), gpu.surface_format());
         let lines = LineRenderer::new(gpu.device(), gpu.surface_format());
 
         Simple {
+            driver,
             cameras,
             camera_id,
             max_dt: 0.1,
@@ -271,7 +283,6 @@ impl Example for Simple {
             lines,
             prop,
             mech,
-            camera_mech,
             body_id,
             mech_b,
             body_b_id,
@@ -335,21 +346,13 @@ impl Example for Simple {
         // --- Simulation ---
         let dt = self.tick();
         let epoch = Epoch::standalone(dt, 1.0);
-        // `mech`, `mech_b` and the camera all step concurrently in one batch.
+        // `mech`, `mech_b` and the camera all step concurrently as one epoch.
         // The camera OBSERVES the targets (its tracker reads target.centroid()
         // / centroid_velocity()), but those now read a PUBLISHED snapshot from
         // their own locks — not `inner` — so the camera no longer blocks on a
         // target's step-long write lock. It reads last-step's summary (lag-1),
         // which is exactly the observer semantics we want.
-        for r in futures::future::join_all([
-            self.mech.step(&epoch),
-            self.mech_b.step(&epoch),
-            self.camera_mech.step(&epoch),
-        ])
-        .await
-        {
-            r.unwrap();
-        }
+        self.driver.step(&epoch).await.unwrap();
         self.prop.advance_epoch();
 
         // --- Switch target every SWITCH_PERIOD sim-seconds ---

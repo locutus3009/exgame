@@ -17,9 +17,13 @@ use rembrandt::GpuAccelerator;
 use shaders::ShaderSetup;
 use std::any::{TypeId, type_name};
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::marker::PhantomData;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender};
+use std::task::{Context, Poll, Waker};
 use std::thread::{self, JoinHandle};
 use tokio::sync::Semaphore;
 use vulkano::{
@@ -148,7 +152,127 @@ enum Message {
         input: MessageInput,
         respond_to: oneshot::Sender<Result<(), EvalError>>,
     },
+    /// Every producer of the running epoch is parked (or the last one left):
+    /// nothing more will arrive until something is answered, so flush now.
+    Quiescent,
     Shutdown,
+}
+
+/// The producers of the epoch being driven, as the worker and the producers
+/// see them (ACCELERATOR.md Part II, the quiescence backstop).
+///
+/// `active` counts the producers registered for the epoch that have not
+/// finished; `parked` counts those whose last poll returned `Pending`. When
+/// the two meet, no producer can submit anything more until a flush answers
+/// one of them, so the producer that completed the count asks the worker to
+/// flush. While `active` is non-zero the worker does not flush merely because
+/// its channel ran dry — a batch fills until quiescence or until it is full.
+/// With no producers registered, the worker keeps its idle path: flush when
+/// the channel looks empty.
+#[derive(Default)]
+struct Quiescence {
+    active: AtomicUsize,
+    parked: AtomicUsize,
+}
+
+/// One producer of an epoch: a future the accelerator counts as active until
+/// it completes (or is dropped), and as parked from the moment its poll returns
+/// `Pending` until it is WOKEN — not until it is next polled. A combinator
+/// such as `join_all` re-polls every member whenever any of them wakes, so a
+/// producer whose result already arrived would otherwise still look parked
+/// while its siblings run, and the count would meet early.
+///
+/// A producer that is pending on something other than a submission (a
+/// contended lock, say) counts as parked too. The worst that costs is one
+/// early flush; it can never hold a batch back, because the counts cannot
+/// meet while a producer is runnable.
+struct Producer<F: Future> {
+    tx: Sender<Message>,
+    state: Arc<ProducerWaker>,
+    fut: Pin<Box<F>>,
+    done: bool,
+}
+
+/// The waker a producer's future is polled with: it unparks the producer,
+/// then wakes whatever polls the producer.
+struct ProducerWaker {
+    q: Arc<Quiescence>,
+    parked: AtomicBool,
+    outer: futures::task::AtomicWaker,
+}
+
+impl ProducerWaker {
+    fn unpark(&self) {
+        if self.parked.swap(false, Ordering::SeqCst) {
+            self.q.parked.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+}
+
+impl std::task::Wake for ProducerWaker {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.unpark();
+        self.outer.wake();
+    }
+}
+
+impl<F: Future> Producer<F> {
+    /// Ask for a flush if every active producer is parked, counting from a
+    /// value just observed.
+    fn flush_if_quiescent(&self, parked: usize) {
+        if parked == self.state.q.active.load(Ordering::SeqCst) {
+            // A dead worker answers every job with `WorkerGone` by dropping
+            // its senders; there is nothing to report here.
+            let _ = self.tx.send(Message::Quiescent);
+        }
+    }
+
+    fn finish(&mut self) {
+        self.state.unpark();
+        if !self.done {
+            self.done = true;
+            self.state.q.active.fetch_sub(1, Ordering::SeqCst);
+            self.flush_if_quiescent(self.state.q.parked.load(Ordering::SeqCst));
+        }
+    }
+}
+
+impl<F: Future> Future for Producer<F> {
+    type Output = F::Output;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
+        let this = &mut *self;
+        // Polled at all means runnable: a wake that raced the last poll's
+        // `Pending` left the producer counted as parked.
+        this.state.unpark();
+        this.state.outer.register(cx.waker());
+        let waker = Waker::from(this.state.clone());
+        match this.fut.as_mut().poll(&mut Context::from_waker(&waker)) {
+            Poll::Ready(out) => {
+                this.finish();
+                Poll::Ready(out)
+            }
+            Poll::Pending => {
+                if !this.state.parked.swap(true, Ordering::SeqCst) {
+                    let parked = this.state.q.parked.fetch_add(1, Ordering::SeqCst) + 1;
+                    this.flush_if_quiescent(parked);
+                }
+                Poll::Pending
+            }
+        }
+    }
+}
+
+impl<F: Future> Drop for Producer<F> {
+    /// A producer dropped before it completed (its epoch was cancelled) leaves
+    /// the count, so the others are not held back waiting for it.
+    fn drop(&mut self) {
+        self.finish();
+    }
 }
 
 /// Bake the per-body incidence cache (`RigidBody::incident_terms`) from the joints —
@@ -207,6 +331,8 @@ pub(crate) fn bake_incidence<T, S>(
 
 struct Shaders {
     shaders: HashMap<MessageKind, Box<dyn ShaderSetup>>,
+    /// The one-writer-per-slot ledger every shader of `shaders` claims into.
+    ledger: Arc<shaders::Ledger>,
     cmd_allocator: Arc<StandardCommandBufferAllocator>,
     gpu: Arc<GpuAccelerator>,
     world: Arc<World>,
@@ -222,38 +348,42 @@ impl Shaders {
         }
     }
 
+    /// Times a flush is re-recorded because a storage it binds grew between
+    /// recording and taking the guards, before it gives up with `Backend`.
+    /// Growth is a rare structural event, so one retry nearly always suffices.
+    const MAX_RERECORD: usize = 8;
+
+    /// Record every non-empty batch into one command buffer and submit it.
+    ///
+    /// Order matters twice:
+    /// 1. The one-writer check is a PRE-PASS over every kind of the flush, so a
+    ///    collision refuses the whole flush before any kind is recorded.
+    /// 2. `setup` binds the CURRENT buffer of each storage, taking read locks
+    ///    on them, so it has to run before the write guards are taken — the
+    ///    locks are not reentrant. A storage can therefore grow between
+    ///    recording and guarding. Once the guards are held growth is excluded,
+    ///    so the bindings are re-checked there, and a stale recording is thrown
+    ///    away and recorded again instead of being submitted against an old
+    ///    buffer.
     fn dispatch(&self, gpu_batches: &mut PendingByKind) -> Result<(), EvalError> {
-        let queue = self.gpu.queue();
-        let mut builder = AutoCommandBufferBuilder::primary(
-            self.cmd_allocator.clone(),
-            queue.queue_family_index(),
-            CommandBufferUsage::OneTimeSubmit,
-        )
-        .map_err(Self::backend)?;
-
-        let mut storages = HashSet::new();
-
+        self.ledger.begin();
         for (kind, batch) in gpu_batches.iter() {
             if batch.is_empty() {
                 continue;
             }
+            self.shaders[kind]
+                .claim(batch)
+                .map_err(|msg| EvalError::Backend {
+                    shader: "one-writer check",
+                    msg,
+                })?;
+        }
 
-            self.shaders[kind].storages().iter().for_each(|t| {
-                storages.insert(*t);
-            });
-            // `setup` reports the INVOCATIONS the batch filled, which is not its
-            // message count: a row-driven message carries a whole round.
-            let count = self.shaders[kind].setup(&mut builder, batch)?;
-            if count == 0 {
-                continue;
-            }
-            // SAFETY: one invocation per index-table row, rounded up to whole
-            // workgroups; the kernel bounds-checks each against `count`, and every
-            // row within `count` addresses a live slot whose key the batch holds.
-            unsafe {
-                builder
-                    .dispatch([count.div_ceil(GpuAccelerator::LOCAL_SIZE_X), 1, 1])
-                    .map_err(Self::backend)?;
+        let queue = self.gpu.queue();
+        let mut storages = HashSet::new();
+        for (kind, batch) in gpu_batches.iter() {
+            if !batch.is_empty() {
+                storages.extend(self.shaders[kind].storages().iter().copied());
             }
         }
 
@@ -264,18 +394,68 @@ impl Shaders {
         // region no matter how the scopes below are later rearranged.
         let mut retired: Vec<MessageInput> = Vec::new();
 
-        #[cfg(test)]
-        if let Some(f) = &self.fault {
-            f.trip(gpu_batches)?;
-        }
+        let mut attempt = 0;
+        loop {
+            let mut builder = AutoCommandBufferBuilder::primary(
+                self.cmd_allocator.clone(),
+                queue.queue_family_index(),
+                CommandBufferUsage::OneTimeSubmit,
+            )
+            .map_err(Self::backend)?;
 
-        {
+            for (kind, batch) in gpu_batches.iter() {
+                if batch.is_empty() {
+                    continue;
+                }
+                // `setup` reports the INVOCATIONS the batch filled, which is not its
+                // message count: a row-driven message carries a whole round.
+                let count = self.shaders[kind].setup(&mut builder, batch)?;
+                if count == 0 {
+                    continue;
+                }
+                // SAFETY: one invocation per index-table row, rounded up to whole
+                // workgroups; the kernel bounds-checks each against `count`, and every
+                // row within `count` addresses a live slot whose key the batch holds.
+                unsafe {
+                    builder
+                        .dispatch([count.div_ceil(GpuAccelerator::LOCAL_SIZE_X), 1, 1])
+                        .map_err(Self::backend)?;
+                }
+            }
+
+            #[cfg(test)]
+            if attempt == 0
+                && let Some(f) = &self.fault
+            {
+                f.trip(gpu_batches)?;
+                if let Some(grow) = f.grow.lock().unwrap().take() {
+                    grow();
+                }
+            }
+
             let command_buffer = builder.build().map_err(Self::backend)?;
 
             let _guards: Vec<_> = storages
                 .iter()
                 .map(|t| self.world.write_guard(*t))
                 .collect();
+            let grown = gpu_batches
+                .iter()
+                .filter(|(_, batch)| !batch.is_empty())
+                .find_map(|(kind, _)| self.shaders[kind].stale());
+            if let Some(t) = grown {
+                #[cfg(test)]
+                if let Some(f) = &self.fault {
+                    f.rerecorded.fetch_add(1, Ordering::SeqCst);
+                }
+                attempt += 1;
+                if attempt > Self::MAX_RERECORD {
+                    return Err(Self::backend(format!(
+                        "world storage {t:?} kept growing while the flush was recorded"
+                    )));
+                }
+                continue;
+            }
             sync::now(self.gpu.device().clone())
                 .then_execute(queue.clone(), command_buffer)
                 .map_err(Self::backend)?
@@ -283,6 +463,7 @@ impl Shaders {
                 .map_err(Self::backend)?
                 .wait(None)
                 .map_err(Self::backend)?;
+            break;
         }
 
         for (kind, batch) in gpu_batches.iter_mut() {
@@ -333,6 +514,11 @@ pub(crate) struct FaultInjector {
     fail: std::sync::atomic::AtomicUsize,
     /// Messages each failed flush carried, in order.
     failed_jobs: std::sync::Mutex<Vec<usize>>,
+    /// Run once, on the worker, after the next flush is recorded and before
+    /// its guards are taken — to grow a storage inside that gap.
+    grow: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Recordings thrown away because a bound storage had grown.
+    rerecorded: AtomicUsize,
 }
 
 #[cfg(test)]
@@ -375,6 +561,10 @@ pub struct Accelerator<T: Scalar + StandardPart + PartialOrd + Lift<T> + Pod> {
     /// arrives. A producer that finds none left WAITS (asynchronously) instead
     /// of growing the queue without limit.
     permits: Semaphore,
+    /// Producers of the epoch being driven — see [`Quiescence`].
+    quiescence: Arc<Quiescence>,
+    /// Flushes the worker has submitted (or attempted) so far.
+    flushes: Arc<AtomicUsize>,
     /// The message path is fully type-erased — a payload is slot INDICES, and the
     /// scalar type only ever appears in this handle's own signatures.
     _marker: PhantomData<T>,
@@ -404,6 +594,36 @@ impl<T: Scalar + StandardPart + PartialOrd + Lift<T> + Pod> Accelerator<T> {
             fault: None,
             _marker: PhantomData,
         }
+    }
+
+    /// Flushes this accelerator's worker has run so far, failed ones included.
+    /// A diagnostic: how many submissions a workload cost.
+    pub fn flushes(&self) -> usize {
+        self.flushes.load(Ordering::SeqCst)
+    }
+
+    /// Run `producers` concurrently as ONE epoch: each is counted as a
+    /// producer from before the first of them is polled until it completes, so
+    /// the worker flushes when all of them are parked (quiescence) or a batch
+    /// is full, not whenever its channel happens to look empty. Outputs come
+    /// back in input order.
+    pub(crate) async fn epoch<F: Future>(&self, producers: Vec<F>) -> Vec<F::Output> {
+        // Registered all at once, before any is polled: counting them one by one
+        // would let the first to park look like the whole epoch.
+        self.quiescence
+            .active
+            .fetch_add(producers.len(), Ordering::SeqCst);
+        let producers = producers.into_iter().map(|f| Producer {
+            tx: self.tx.clone(),
+            state: Arc::new(ProducerWaker {
+                q: self.quiescence.clone(),
+                parked: AtomicBool::new(false),
+                outer: futures::task::AtomicWaker::new(),
+            }),
+            fut: Box::pin(f),
+            done: false,
+        });
+        join_all(producers).await
     }
 
     /// Dispatch one connected island's connection kernels — the accelerator-owned
@@ -800,8 +1020,10 @@ impl<T: Scalar + StandardPart + PartialOrd + Lift<T> + Pod + Sync + Send + 'stat
         let gpu_batch_size = self.batch_size.unwrap_or(capacity).min(capacity);
         let log_flushes = self.log_flushes;
 
+        let ledger = Arc::new(shaders::Ledger::default());
         let shaders = Shaders {
-            shaders: shaders::all_shaders(w),
+            shaders: shaders::all_shaders(w, &ledger),
+            ledger,
             cmd_allocator: g.cmd_allocator().clone(),
             gpu: g,
             world: w.clone(),
@@ -813,6 +1035,9 @@ impl<T: Scalar + StandardPart + PartialOrd + Lift<T> + Pod + Sync + Send + 'stat
         // producer awaits instead of blocking its executor thread on a full
         // `sync_channel`.
         let (tx, rx) = mpsc::channel::<Message>();
+        let quiescence = Arc::new(Quiescence::default());
+        let flushes = Arc::new(AtomicUsize::new(0));
+        let (worker_q, worker_flushes) = (quiescence.clone(), flushes.clone());
         let thread = thread::spawn(move || {
             // Register every message kind's batch up front, so the push site is a
             // plain lookup. A message whose kind is missing here is a wiring bug (a
@@ -845,7 +1070,12 @@ impl<T: Scalar + StandardPart + PartialOrd + Lift<T> + Pod + Sync + Send + 'stat
                 // filling we keep the same short poll, because "the channel went
                 // empty" is exactly what decides the flush — changing that would
                 // change how work packs, which is a separate question.
-                let msg = if pending == 0 {
+                //
+                // While an epoch is being driven, an empty channel decides nothing
+                // either: the producers announce quiescence themselves, so BLOCK
+                // until a job, that announcement, or shutdown arrives.
+                let driven = worker_q.active.load(Ordering::SeqCst) > 0;
+                let msg = if pending == 0 || driven {
                     match rx.recv() {
                         Ok(m) => Ok(m),
                         // Every sender gone: nothing more can arrive.
@@ -870,6 +1100,7 @@ impl<T: Scalar + StandardPart + PartialOrd + Lift<T> + Pod + Sync + Send + 'stat
                         // chunks), so one always fits.
                         let full = *rows_in.get(&kind).unwrap() + n > gpu_batch_size;
                         if full && pending > 0 {
+                            worker_flushes.fetch_add(1, Ordering::SeqCst);
                             shaders.flush(&mut gpu_batches);
                             pending = 0;
                             max_len = 0;
@@ -885,7 +1116,7 @@ impl<T: Scalar + StandardPart + PartialOrd + Lift<T> + Pod + Sync + Send + 'stat
                         max_len = max_len.max(*queued);
                     }
                     Ok(Message::Shutdown) => break,
-                    _ => {
+                    Ok(Message::Quiescent) | Err(()) => {
                         empty = true;
                     }
                 };
@@ -900,6 +1131,7 @@ impl<T: Scalar + StandardPart + PartialOrd + Lift<T> + Pod + Sync + Send + 'stat
                             "[GPU] Total size of all {non_zero} batches: {pending:5} (max {max_len:5} in batch)"
                         );
                     }
+                    worker_flushes.fetch_add(1, Ordering::SeqCst);
                     shaders.flush(&mut gpu_batches);
                     pending = 0;
                     max_len = 0;
@@ -913,6 +1145,8 @@ impl<T: Scalar + StandardPart + PartialOrd + Lift<T> + Pod + Sync + Send + 'stat
             tx,
             capacity,
             permits: Semaphore::new(self.max_pending),
+            quiescence,
+            flushes,
             _marker: PhantomData,
         }
     }
@@ -1579,6 +1813,46 @@ mod tests {
     fn gpu_path_rejects_non_f32_world() {
         let world = Arc::new(World::builder().usual::<f64>());
         let _accel = Accelerator::<f64>::builder(world).build();
+    }
+
+    /// A storage that grows after a flush is recorded but before its guards are
+    /// taken must not make the kernel run on the old buffer, nor fail the job:
+    /// the flush notices under the guards and records again.
+    #[tokio::test]
+    async fn growth_between_recording_and_guards_is_rerecorded_not_reported() {
+        const INITIAL: usize = 16;
+        let world = Arc::new(World::builder().capacity(INITIAL).usual::<f32>());
+        let (a, b, out) = {
+            let mut map = world.write::<f32>();
+            (map.add(2.0), map.add(3.0), map.add(0.0))
+        };
+        let fault = Arc::new(FaultInjector::default());
+        let grown_keys = Arc::new(std::sync::Mutex::new(Vec::new()));
+        {
+            let (world, keys) = (world.clone(), grown_keys.clone());
+            *fault.grow.lock().unwrap() = Some(Box::new(move || {
+                let mut map = world.write::<f32>();
+                let mut keys = keys.lock().unwrap();
+                keys.extend((0..4 * INITIAL).map(|_| map.add(0.0)));
+            }));
+        }
+        let generation = world.generation(TypeId::of::<f32>());
+        let accel = Accelerator::<f32>::builder(world.clone())
+            .inject_faults(fault.clone())
+            .build();
+
+        accel.simple_sum(&a, &b, &out).await.unwrap();
+
+        assert_ne!(
+            world.generation(TypeId::of::<f32>()),
+            generation,
+            "the hook did not grow the storage"
+        );
+        assert_eq!(
+            fault.rerecorded.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(out.read(), 5.0, "the kernel did not reach the grown buffer");
     }
 
     /// A flush that fails must answer EVERY job it carried with

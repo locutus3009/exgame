@@ -16,7 +16,7 @@ use clifford::pga3::Twist;
 use joints::{AxialSpringDamper, Joint, SimpleSpringDamper};
 use newton::field::UniformField;
 use newton::integrator::{ImplicitIntegrator, Newton};
-use newton::{Accelerator, Inert, Inertia, Mechanism, RigidBody};
+use newton::{Accelerator, Driver, Inert, Inertia, Mechanism, RigidBody};
 use peano::prelude::*;
 use std::sync::Arc;
 
@@ -85,7 +85,6 @@ async fn positions(mech: &Mechanism<f32, f32>, ids: &[WorldId]) -> Vec<[f32; 3]>
 /// versus the same three stepping one at a time, each on its own accelerator.
 #[tokio::test]
 async fn mechanisms_sharing_one_accelerator_match_solo_runs() {
-    use futures::future::join_all;
     const DT: f32 = 1.0 / 60.0;
     const STEPS: usize = 40;
     // Different sizes — so that the mechanisms' rounds have DIFFERENT lengths: identical ones
@@ -104,20 +103,21 @@ async fn mechanisms_sharing_one_accelerator_match_solo_runs() {
         solo.push(positions(&mech, &ids).await);
     }
 
-    // Together: one world, ONE accelerator, steps via join_all — i.e. their
-    // rounds land in one and the same batch table.
+    // Together: one world, ONE accelerator, stepped by the epoch driver — i.e.
+    // their rounds land in one and the same batch table.
     let world = Arc::new(World::builder().usual::<f32>());
     let accel = Arc::new(Accelerator::<f32>::builder(world.clone()).build());
+    let mut driver = Driver::new(accel.clone());
     let mut together = Vec::new();
     for (n, seed) in SHAPES {
-        together.push(chain(world.clone(), &accel, n, seed).await);
+        let (mech, ids) = chain(world.clone(), &accel, n, seed).await;
+        let mech = Arc::new(mech);
+        driver.add(mech.clone()).await.unwrap();
+        together.push((mech, ids));
     }
     let epoch = Epoch::standalone(DT, 1.0);
     for _ in 0..STEPS {
-        let futs = together.iter().map(|(m, _)| m.step(&epoch));
-        for r in join_all(futs).await {
-            r.unwrap();
-        }
+        driver.step(&epoch).await.unwrap();
     }
 
     for (i, ((mech, ids), want)) in together.iter().zip(&solo).enumerate() {
