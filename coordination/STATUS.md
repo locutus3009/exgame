@@ -5,17 +5,17 @@
 
 ## Portfolio overview
 
-**8 ARs tracked** across 2 active status categories.
+**8 ARs tracked** across 1 active status categories.
 
 | Status | Meaning | Count |
 | --- | --- | ---: |
 | **In progress** | Claimed work with a live lease | 0 |
-| **In review** | Submitted by its worker, awaiting a coordinator decision | 1 |
+| **In review** | Submitted by its worker, awaiting a coordinator decision | 0 |
 | **Open** | Dependency-ready and available to claim | 0 |
 | **Blocked** | Cannot proceed until its recorded blocker clears | 0 |
 | **Planned** | Defined work awaiting promotion or dependencies | 0 |
 | **Future** | Deferred roadmap work | 0 |
-| **Done** | Accepted, integrated, and durably verified | 7 |
+| **Done** | Accepted, integrated, and durably verified | 8 |
 | **Cancelled** | Stopped with a recorded rationale | 0 |
 | **Superseded** | Replaced by another AR | 0 |
 
@@ -36,7 +36,7 @@ flowchart LR
         AR_0105["AR-0105 - Done"]:::status_done
         AR_0106["AR-0106 - Done"]:::status_done
         AR_0107["AR-0107 - Done"]:::status_done
-        AR_0108["AR-0108 - In review"]:::status_in_review
+        AR_0108["AR-0108 - Done"]:::status_done
     end
     AR_0101 --> AR_0102
     AR_0101 --> AR_0108
@@ -75,13 +75,7 @@ flowchart LR
 
 ## Complete AR inventory
 
-### In review (1)
-
-| Priority | AR | Owner | Summary | Next action |
-| --- | --- | --- | --- | --- |
-| P1 | [AR-0108](tasks/AR-0108.md): Retire ACCELERATOR.md and repoint every reference | Submitted by worker-ar0108 | With M1&#x27;s implementation done, delete ACCELERATOR.md. Move the one authoritative piece (kernel I/O layout) next to the code that defines it and repoint every doc, tool and source comment that cites it. | Claim after every other M1 AR is done; regenerate the reference list with git grep, since the implementation ARs will have moved lines. |
-
-### Done (7)
+### Done (8)
 
 | Priority | AR | Owner | Summary | Next action |
 | --- | --- | --- | --- | --- |
@@ -90,5 +84,6 @@ flowchart LR
 | P0 | [AR-0104](tasks/AR-0104.md): Accelerator worker: failure path, bounded submission, flush policy | Unclaimed | A Vulkan error panics the worker (dispatch(..).unwrap()), so callers only see WorkerGone; the channel is unbounded; every flush prints to stderr; batch composition is never varied in tests. | Claim; write the failing test for a forced submission error first. |
 | P1 | [AR-0103](tasks/AR-0103.md): Cross-mechanism epoch driver with frozen structure and quiescence flush | Unclaimed | Nothing above Mechanism steps all mechanisms of an epoch; callers hand-roll join_all, structure can change mid-epoch, and the worker flushes on a 1 ns idle tick rather than on quiescence. | Claim after AR-0102 and AR-0104 land; design the driver API in the plan&#x27;s evidence first, then implement and migrate callers. |
 | P1 | [AR-0105](tasks/AR-0105.md): Fix the two FIXME: deadlock? reproducers in the implicit solver | Unclaimed | dimension_change_reallocates_and_clears_the_hint and topology_change_causes_no_visible_jolt are #&#91;ignore&#93;d with &#x27;FIXME: deadlock?&#x27;. Suspected: a WorldKey dropped while world.write::&lt;T&gt;() is held. | Claim; run both ignored tests with a timeout to confirm the hang, then confirm or refute the suspected cause before changing code. |
+| P1 | [AR-0108](tasks/AR-0108.md): Retire ACCELERATOR.md and repoint every reference | Unclaimed | With M1&#x27;s implementation done, delete ACCELERATOR.md. Move the one authoritative piece (kernel I/O layout) next to the code that defines it and repoint every doc, tool and source comment that cites it. | Claim after every other M1 AR is done; regenerate the reference list with git grep, since the implementation ARs will have moved lines. |
 | P2 | [AR-0106](tasks/AR-0106.md): Fatal semantics: size and count fatal slots from the trace | Unclaimed | Kernels write fatal operands into a fixed float fatal&#91;20&#93; (build.rs FIXME), and n_fatals per kind is hand-entered in shaders.rs. Derive both from the trace and pin the mark-and-continue semantics. | Claim; read build.rs fatal_map and the shaders.rs check table, then make build.rs emit the per-kind fatal count. |
 | P3 | [AR-0107](tasks/AR-0107.md): Precision seam: measure f32 base poses far from the origin | Unclaimed | The shaders bind Motor&lt;f32&gt; base poses directly; ACCELERATOR.md Part V calls the precision of that narrowing unexamined. Islands re-anchor at their centre of mass; measure whether that suffices. | Claim; write a test that steps the same mechanism at the origin and translated far away and compares relative motion. |
