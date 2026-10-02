@@ -17,9 +17,13 @@ use rembrandt::GpuAccelerator;
 use shaders::ShaderSetup;
 use std::any::{TypeId, type_name};
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::marker::PhantomData;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender};
+use std::task::{Context, Poll};
 use std::thread::{self, JoinHandle};
 use tokio::sync::Semaphore;
 use vulkano::{
@@ -148,7 +152,100 @@ enum Message {
         input: MessageInput,
         respond_to: oneshot::Sender<Result<(), EvalError>>,
     },
+    /// Every producer of the running epoch is parked (or the last one left):
+    /// nothing more will arrive until something is answered, so flush now.
+    Quiescent,
     Shutdown,
+}
+
+/// The producers of the epoch being driven, as the worker and the producers
+/// see them (ACCELERATOR.md Part II, the quiescence backstop).
+///
+/// `active` counts the producers registered for the epoch that have not
+/// finished; `parked` counts those whose last poll returned `Pending`. When
+/// the two meet, no producer can submit anything more until a flush answers
+/// one of them, so the producer that completed the count asks the worker to
+/// flush. While `active` is non-zero the worker does not flush merely because
+/// its channel ran dry — a batch fills until quiescence or until it is full.
+/// With no producers registered, the worker keeps its idle path: flush when
+/// the channel looks empty.
+#[derive(Default)]
+struct Quiescence {
+    active: AtomicUsize,
+    parked: AtomicUsize,
+}
+
+/// One producer of an epoch: a future the accelerator counts as active until
+/// it completes (or is dropped), and as parked whenever its last poll returned
+/// `Pending`.
+///
+/// A producer that is pending on something other than a submission (a
+/// contended lock, say) counts as parked too. The worst that costs is one
+/// early flush; it can never hold a batch back, because it cannot make the
+/// counts meet while a producer is still running.
+struct Producer<'a, F: Future> {
+    tx: &'a Sender<Message>,
+    q: &'a Quiescence,
+    fut: Pin<Box<F>>,
+    parked: bool,
+    done: bool,
+}
+
+impl<F: Future> Producer<'_, F> {
+    /// Ask for a flush if every active producer is parked, counting from a
+    /// value just observed.
+    fn flush_if_quiescent(&self, parked: usize) {
+        if parked == self.q.active.load(Ordering::SeqCst) {
+            // A dead worker answers every job with `WorkerGone` by dropping
+            // its senders; there is nothing to report here.
+            let _ = self.tx.send(Message::Quiescent);
+        }
+    }
+
+    fn unpark(&mut self) {
+        if self.parked {
+            self.parked = false;
+            self.q.parked.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    fn finish(&mut self) {
+        self.unpark();
+        if !self.done {
+            self.done = true;
+            self.q.active.fetch_sub(1, Ordering::SeqCst);
+            self.flush_if_quiescent(self.q.parked.load(Ordering::SeqCst));
+        }
+    }
+}
+
+impl<F: Future> Future for Producer<'_, F> {
+    type Output = F::Output;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
+        let this = &mut *self;
+        this.unpark();
+        match this.fut.as_mut().poll(cx) {
+            Poll::Ready(out) => {
+                this.finish();
+                Poll::Ready(out)
+            }
+            Poll::Pending => {
+                this.parked = true;
+                let parked = this.q.parked.fetch_add(1, Ordering::SeqCst) + 1;
+                this.flush_if_quiescent(parked);
+                Poll::Pending
+            }
+        }
+    }
+}
+
+impl<F: Future> Drop for Producer<'_, F> {
+    /// A producer dropped before it completed (its epoch was cancelled) leaves
+    /// the count, so the others are not held back waiting for it.
+    fn drop(&mut self) {
+        self.finish();
+    }
 }
 
 /// Bake the per-body incidence cache (`RigidBody::incident_terms`) from the joints —
@@ -425,6 +522,10 @@ pub struct Accelerator<T: Scalar + StandardPart + PartialOrd + Lift<T> + Pod> {
     /// arrives. A producer that finds none left WAITS (asynchronously) instead
     /// of growing the queue without limit.
     permits: Semaphore,
+    /// Producers of the epoch being driven — see [`Quiescence`].
+    quiescence: Arc<Quiescence>,
+    /// Flushes the worker has submitted (or attempted) so far.
+    flushes: Arc<AtomicUsize>,
     /// The message path is fully type-erased — a payload is slot INDICES, and the
     /// scalar type only ever appears in this handle's own signatures.
     _marker: PhantomData<T>,
@@ -454,6 +555,34 @@ impl<T: Scalar + StandardPart + PartialOrd + Lift<T> + Pod> Accelerator<T> {
             fault: None,
             _marker: PhantomData,
         }
+    }
+
+    /// Flushes this accelerator's worker has run so far, failed ones included.
+    /// A diagnostic: how many submissions a workload cost.
+    pub fn flushes(&self) -> usize {
+        self.flushes.load(Ordering::SeqCst)
+    }
+
+    /// Run `producers` concurrently as ONE epoch: each is counted as a
+    /// producer from before the first of them is polled until it completes, so
+    /// the worker flushes when all of them are parked (quiescence) or a batch
+    /// is full, not whenever its channel happens to look empty. Outputs come
+    /// back in input order.
+    pub(crate) async fn epoch<F: Future>(&self, producers: Vec<F>) -> Vec<F::Output> {
+        // Registered all at once, before any is polled: counting them one by one
+        // would let the first to park look like the whole epoch.
+        self.quiescence
+            .active
+            .fetch_add(producers.len(), Ordering::SeqCst);
+        let q = &*self.quiescence;
+        let producers = producers.into_iter().map(|f| Producer {
+            tx: &self.tx,
+            q,
+            fut: Box::pin(f),
+            parked: false,
+            done: false,
+        });
+        join_all(producers).await
     }
 
     /// Dispatch one connected island's connection kernels — the accelerator-owned
@@ -865,6 +994,9 @@ impl<T: Scalar + StandardPart + PartialOrd + Lift<T> + Pod + Sync + Send + 'stat
         // producer awaits instead of blocking its executor thread on a full
         // `sync_channel`.
         let (tx, rx) = mpsc::channel::<Message>();
+        let quiescence = Arc::new(Quiescence::default());
+        let flushes = Arc::new(AtomicUsize::new(0));
+        let (worker_q, worker_flushes) = (quiescence.clone(), flushes.clone());
         let thread = thread::spawn(move || {
             // Register every message kind's batch up front, so the push site is a
             // plain lookup. A message whose kind is missing here is a wiring bug (a
@@ -897,7 +1029,12 @@ impl<T: Scalar + StandardPart + PartialOrd + Lift<T> + Pod + Sync + Send + 'stat
                 // filling we keep the same short poll, because "the channel went
                 // empty" is exactly what decides the flush — changing that would
                 // change how work packs, which is a separate question.
-                let msg = if pending == 0 {
+                //
+                // While an epoch is being driven, an empty channel decides nothing
+                // either: the producers announce quiescence themselves, so BLOCK
+                // until a job, that announcement, or shutdown arrives.
+                let driven = worker_q.active.load(Ordering::SeqCst) > 0;
+                let msg = if pending == 0 || driven {
                     match rx.recv() {
                         Ok(m) => Ok(m),
                         // Every sender gone: nothing more can arrive.
@@ -922,6 +1059,7 @@ impl<T: Scalar + StandardPart + PartialOrd + Lift<T> + Pod + Sync + Send + 'stat
                         // chunks), so one always fits.
                         let full = *rows_in.get(&kind).unwrap() + n > gpu_batch_size;
                         if full && pending > 0 {
+                            worker_flushes.fetch_add(1, Ordering::SeqCst);
                             shaders.flush(&mut gpu_batches);
                             pending = 0;
                             max_len = 0;
@@ -937,7 +1075,7 @@ impl<T: Scalar + StandardPart + PartialOrd + Lift<T> + Pod + Sync + Send + 'stat
                         max_len = max_len.max(*queued);
                     }
                     Ok(Message::Shutdown) => break,
-                    _ => {
+                    Ok(Message::Quiescent) | Err(()) => {
                         empty = true;
                     }
                 };
@@ -952,6 +1090,7 @@ impl<T: Scalar + StandardPart + PartialOrd + Lift<T> + Pod + Sync + Send + 'stat
                             "[GPU] Total size of all {non_zero} batches: {pending:5} (max {max_len:5} in batch)"
                         );
                     }
+                    worker_flushes.fetch_add(1, Ordering::SeqCst);
                     shaders.flush(&mut gpu_batches);
                     pending = 0;
                     max_len = 0;
@@ -965,6 +1104,8 @@ impl<T: Scalar + StandardPart + PartialOrd + Lift<T> + Pod + Sync + Send + 'stat
             tx,
             capacity,
             permits: Semaphore::new(self.max_pending),
+            quiescence,
+            flushes,
             _marker: PhantomData,
         }
     }

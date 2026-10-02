@@ -11,8 +11,73 @@ use clifford::pga3::{Motor, Point, Twist, Wrench};
 use futures::future::join_all;
 use joints::Joint;
 use peano::prelude::*;
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
+use tokio::sync::{RwLock, RwLockWriteGuard};
+
+/// Why a structural change, or a driver registration, was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StructureError {
+    /// The mechanism (by id) is inside an epoch: its structure is frozen until
+    /// the epoch ends (ACCELERATOR.md Part II, the epoch invariant). Refused
+    /// rather than queued — retry between epochs.
+    EpochInProgress(WorldId),
+    /// The body (by world id) already belongs to a mechanism. A body has
+    /// exactly one owner, which is what keeps every slot single-writer across
+    /// mechanisms (ACCELERATOR.md Part III).
+    AlreadyOwned(WorldId),
+    /// The mechanism (by id) runs on a different accelerator than the driver.
+    ForeignAccelerator(WorldId),
+    /// The mechanism (by id) is already registered with the driver.
+    DuplicateMechanism(WorldId),
+}
+
+impl std::fmt::Display for StructureError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EpochInProgress(m) => write!(
+                f,
+                "mechanism {m:?} is inside an epoch; its structure is frozen until the epoch ends"
+            ),
+            Self::AlreadyOwned(b) => write!(
+                f,
+                "duplicate world id {b:?}: the body already belongs to a mechanism"
+            ),
+            Self::ForeignAccelerator(m) => write!(
+                f,
+                "mechanism {m:?} runs on a different accelerator than the driver"
+            ),
+            Self::DuplicateMechanism(m) => {
+                write!(f, "mechanism {m:?} is already registered with the driver")
+            }
+        }
+    }
+}
+
+impl std::error::Error for StructureError {}
+
+/// Every body world id currently owned by a live mechanism, process-wide.
+/// World ids are unique per process (`WorldId::get`), so one set serves every
+/// world and every accelerator. A body is claimed when it is added and released
+/// when it is detached or its mechanism is dropped; `split` and `merge` move
+/// bodies between mechanisms without releasing them.
+static OWNED: LazyLock<Mutex<HashSet<WorldId>>> = LazyLock::new(Default::default);
+
+/// The owned set. Nothing panics while holding it, so a poisoned lock can
+/// only come from an unrelated panic elsewhere; the set itself is intact.
+fn owned() -> std::sync::MutexGuard<'static, HashSet<WorldId>> {
+    OWNED.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Keeps a mechanism's structure frozen while alive — see [`Mechanism::freeze`].
+pub(crate) struct Frozen<'a>(&'a AtomicUsize);
+
+impl Drop for Frozen<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 // ============================================================================
 // MECHANISM
@@ -64,6 +129,12 @@ pub struct Mechanism<
     centroid: RwLock<Option<Point<S>>>,
     centroid_velocity: RwLock<Option<Twist<T>>>,
     inner: RwLock<MechanismInner<T, S>>,
+    /// Epochs (and bare steps) currently holding the structure frozen.
+    frozen: AtomicUsize,
+    /// Epochs (and bare steps) ever begun. A structural change compares it
+    /// before and after waiting for `inner`, so one that started waiting just
+    /// before an epoch began is refused instead of running after it.
+    epochs: AtomicU64,
 }
 
 struct MechanismInner<
@@ -97,7 +168,38 @@ impl<T: Scalar + StandardPart + PartialOrd + Lift<T> + Pod, S: Scalar + From<T> 
                 fields: Vec::new(),
                 integrator,
             }),
+            frozen: AtomicUsize::new(0),
+            epochs: AtomicU64::new(0),
         }
+    }
+
+    /// Freeze the structure until the returned guard drops: every structural
+    /// change (`try_add_body`, `try_connect`, `try_remove_body`, `try_split`,
+    /// `try_merge`) is refused with [`StructureError::EpochInProgress`]
+    /// meanwhile. `step` freezes for its own duration; the driver freezes all
+    /// its mechanisms for the whole epoch.
+    pub(crate) fn freeze(&self) -> Frozen<'_> {
+        self.frozen.fetch_add(1, Ordering::SeqCst);
+        self.epochs.fetch_add(1, Ordering::SeqCst);
+        Frozen(&self.frozen)
+    }
+
+    /// The structure lock, for a structural change — refused, never queued,
+    /// while an epoch holds the structure frozen or if one began while this
+    /// call was waiting for the lock.
+    async fn structure(
+        &self,
+    ) -> Result<RwLockWriteGuard<'_, MechanismInner<T, S>>, StructureError> {
+        let refused = StructureError::EpochInProgress(self.id);
+        let began = self.epochs.load(Ordering::SeqCst);
+        if self.frozen.load(Ordering::SeqCst) > 0 {
+            return Err(refused);
+        }
+        let guard = self.inner.write().await;
+        if self.frozen.load(Ordering::SeqCst) > 0 || self.epochs.load(Ordering::SeqCst) != began {
+            return Err(refused);
+        }
+        Ok(guard)
     }
 
     /// This mechanism's accelerator — pull it to build a sibling integrator that
@@ -108,12 +210,29 @@ impl<T: Scalar + StandardPart + PartialOrd + Lift<T> + Pod, S: Scalar + From<T> 
 
     // --- Graph composition (public — world ids) ---
 
-    /// Add a body under a world id. Panics on a duplicate id.
+    /// Add a body under its world id. Panics where [`Self::try_add_body`]
+    /// refuses.
     pub async fn add_body(&self, entity: Box<dyn Component<T, S>>) -> WorldId {
-        let mut guard = self.inner.write().await;
-        let id = guard.islands.add_body(entity);
+        self.try_add_body(entity)
+            .await
+            .unwrap_or_else(|e| panic!("add_body: {e}"))
+    }
+
+    /// Add a body under its world id. Refused (and the entity dropped) while
+    /// an epoch is in progress, or if a mechanism — this one or another —
+    /// already owns a body with that id.
+    pub async fn try_add_body(
+        &self,
+        entity: Box<dyn Component<T, S>>,
+    ) -> Result<WorldId, StructureError> {
+        let mut guard = self.structure().await?;
+        let id = entity.id();
+        if !owned().insert(id) {
+            return Err(StructureError::AlreadyOwned(id));
+        }
+        guard.islands.add_body(entity);
         self.store_snapshot(&guard.islands).await;
-        id
+        Ok(id)
     }
 
     /// Alias for Self::add_body()
@@ -123,28 +242,65 @@ impl<T: Scalar + StandardPart + PartialOrd + Lift<T> + Pod, S: Scalar + From<T> 
     }
 
     /// Connect body `world_id` by joints to targets. Each element is (joint,
-    /// target world id). Panics on a self-loop or an unknown id. World ids
-    /// are translated into keys ONCE here.
+    /// target world id). Panics on a self-loop, an unknown id, or where
+    /// [`Self::try_connect`] refuses. World ids are translated into keys ONCE
+    /// here.
     pub async fn connect(&self, world_id: WorldId, links: Vec<(Joint<T>, WorldId)>) {
-        let mut guard = self.inner.write().await;
+        self.try_connect(world_id, links)
+            .await
+            .unwrap_or_else(|e| panic!("connect: {e}"))
+    }
+
+    /// [`Self::connect`], refused while an epoch is in progress.
+    pub async fn try_connect(
+        &self,
+        world_id: WorldId,
+        links: Vec<(Joint<T>, WorldId)>,
+    ) -> Result<(), StructureError> {
+        let mut guard = self.structure().await?;
         guard.islands.connect(world_id, links);
         self.store_snapshot(&guard.islands).await;
+        Ok(())
     }
 
     /// Remove a body and ALL its joints. Expensive: O(joints) — a linear pass without
-    /// adjacency lists (a deliberate trade-off, removal is rare).
+    /// adjacency lists (a deliberate trade-off, removal is rare). Panics where
+    /// [`Self::try_remove_body`] refuses.
     pub async fn remove_body(&self, world_id: WorldId) {
-        let _g = self.detach(world_id).await;
+        self.try_remove_body(world_id)
+            .await
+            .unwrap_or_else(|e| panic!("remove_body: {e}"))
+    }
+
+    /// [`Self::remove_body`], refused while an epoch is in progress. An unknown
+    /// id is not an error.
+    pub async fn try_remove_body(&self, world_id: WorldId) -> Result<(), StructureError> {
+        self.try_detach(world_id).await.map(|_| ())
     }
 
     /// Internal migration primitive: extract a body whole (with its behavior), cutting
     /// its joints. `pub(crate)` — not public API (from outside only split/merge),
     /// but the integration tests in `mod.rs` call it. None if the id is unknown.
+    #[cfg(test)]
     pub(crate) async fn detach(&self, world_id: WorldId) -> Option<Box<dyn Component<T, S>>> {
-        let mut guard = self.inner.write().await;
+        self.try_detach(world_id)
+            .await
+            .unwrap_or_else(|e| panic!("detach: {e}"))
+    }
+
+    /// [`Self::detach`], refused while an epoch is in progress. The body is
+    /// released: it may be added to a mechanism again.
+    async fn try_detach(
+        &self,
+        world_id: WorldId,
+    ) -> Result<Option<Box<dyn Component<T, S>>>, StructureError> {
+        let mut guard = self.structure().await?;
         let out = guard.islands.detach(world_id);
+        if out.is_some() {
+            owned().remove(&world_id);
+        }
         self.store_snapshot(&guard.islands).await;
-        out
+        Ok(out)
     }
 
     /// Register a force field.
@@ -166,13 +322,24 @@ impl<T: Scalar + StandardPart + PartialOrd + Lift<T> + Pod, S: Scalar + From<T> 
     /// - boundary (one end in the group, the other not) — are CUT;
     /// - external (both outside) — stay in `self`.
     ///
-    /// Panics on an unknown world id.
+    /// Panics on an unknown world id, or where [`Self::try_split`] refuses.
     pub async fn split(
         &self,
         world_ids: &[WorldId],
         integrator: ImplicitIntegrator<T>,
     ) -> Mechanism<T, S> {
-        let mut guard = self.inner.write().await;
+        self.try_split(world_ids, integrator)
+            .await
+            .unwrap_or_else(|e| panic!("split: {e}"))
+    }
+
+    /// [`Self::split`], refused while an epoch is in progress.
+    pub async fn try_split(
+        &self,
+        world_ids: &[WorldId],
+        integrator: ImplicitIntegrator<T>,
+    ) -> Result<Mechanism<T, S>, StructureError> {
+        let mut guard = self.structure().await?;
         for &id in world_ids {
             assert!(
                 guard.islands.island_of(id).is_some(),
@@ -188,7 +355,7 @@ impl<T: Scalar + StandardPart + PartialOrd + Lift<T> + Pod, S: Scalar + From<T> 
         self.store_snapshot(&guard.islands).await;
         let centroid = Self::compute_centroid(&islands);
         let centroid_velocity = Self::compute_centroid_velocity(&islands);
-        Mechanism {
+        Ok(Mechanism {
             centroid: RwLock::new(centroid),
             centroid_velocity: RwLock::new(centroid_velocity),
             id: WorldId::get(),
@@ -197,7 +364,9 @@ impl<T: Scalar + StandardPart + PartialOrd + Lift<T> + Pod, S: Scalar + From<T> 
                 fields: Vec::new(),
                 integrator,
             }),
-        }
+            frozen: AtomicUsize::new(0),
+            epochs: AtomicU64::new(0),
+        })
     }
 
     /// Merge `other` into `self`, creating exactly one joint that CROSSES the boundary
@@ -208,20 +377,39 @@ impl<T: Scalar + StandardPart + PartialOrd + Lift<T> + Pod, S: Scalar + From<T> 
     ///
     /// Panics if the joint does not cross the boundary (both ends on one side is
     /// not a merge but a connect). World id collisions are impossible by construction of
-    /// `WorldId`, so there is no separate check.
+    /// `WorldId`, so there is no separate check. Panics where
+    /// [`Self::try_merge`] refuses.
     pub async fn merge(&self, other: Mechanism<T, S>, link: (Joint<T>, WorldId, WorldId)) {
+        if let Err((e, _)) = self.try_merge(other, link).await {
+            panic!("merge: {e}");
+        }
+    }
+
+    /// [`Self::merge`], refused while `self` is inside an epoch; `other` is
+    /// handed back untouched with the refusal. (`other` itself is taken by
+    /// value, so nothing can be stepping it.)
+    pub async fn try_merge(
+        &self,
+        mut other: Mechanism<T, S>,
+        link: (Joint<T>, WorldId, WorldId),
+    ) -> Result<(), (StructureError, Box<Mechanism<T, S>>)> {
         let (joint, wa, wb) = link;
 
         assert!(self.id != other.id, "Cannot merge self");
 
-        let mut self_guard = self.inner.write().await;
-        let other_inner = other.inner.into_inner(); // consume other
+        let mut self_guard = match self.structure().await {
+            Ok(guard) => guard,
+            Err(e) => return Err((e, Box::new(other))),
+        };
+        // Take other's islands; `other` then drops empty, releasing no body —
+        // its bodies change owner, they are not given up.
+        let other_islands = std::mem::replace(&mut other.inner.get_mut().islands, Islands::new());
 
         // Check boundary crossing BEFORE consuming: one end here, the other there.
         let a_here = self_guard.islands.island_of(wa).is_some();
         let b_here = self_guard.islands.island_of(wb).is_some();
-        let a_there = other_inner.islands.island_of(wa).is_some();
-        let b_there = other_inner.islands.island_of(wb).is_some();
+        let a_there = other_islands.island_of(wa).is_some();
+        let b_there = other_islands.island_of(wb).is_some();
         let crosses = (a_here && b_there) || (b_here && a_there);
         assert!(
             crosses,
@@ -230,11 +418,12 @@ impl<T: Scalar + StandardPart + PartialOrd + Lift<T> + Pod, S: Scalar + From<T> 
 
         // Merge in other's islands as they are, then link across the boundary — union
         // will merge the two islands into one.
-        self_guard.islands.absorb(other_inner.islands);
+        self_guard.islands.absorb(other_islands);
         self_guard.islands.connect(wa, vec![(joint, wb)]);
         // The composition of self grew by other's bodies → recompute the snapshot.
         self.store_snapshot(&self_guard.islands).await;
-        // other's integrator and fields are destroyed here together with other_inner.
+        // other's integrator and fields are destroyed here together with other.
+        Ok(())
     }
 
     // --- Read access (world ids) ---
@@ -342,6 +531,9 @@ where
         // `join_all`-ed. A restriction remains for an observer of a LIVE body
         // (`inspect_body`/`body_absolute_pose` take `inner.read()`) — such a
         // reader will still block on the target's step; the summary is enough.
+        // Frozen for the whole step: a structural change that arrives meanwhile
+        // is refused, not queued behind the lock below.
+        let _frozen = self.freeze();
         let mut guard = self.inner.write().await;
 
         let MechanismInner {
@@ -545,5 +737,21 @@ where
 
     pub fn id(&self) -> WorldId {
         self.id
+    }
+}
+
+impl<T, S> Drop for Mechanism<T, S>
+where
+    T: Scalar + StandardPart + PartialOrd + Pod + Lift<T>,
+    S: Scalar + From<T> + Into<T>,
+{
+    /// Release every body this mechanism still owns, so its world ids may be
+    /// added again.
+    fn drop(&mut self) {
+        let islands = &self.inner.get_mut().islands;
+        let mut owned = owned();
+        for body in islands.all_bodies() {
+            owned.remove(&body.id());
+        }
     }
 }
