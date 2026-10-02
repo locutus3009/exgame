@@ -1,0 +1,150 @@
+{
+  "schema_version": 1,
+  "_about": "Machine-readable pins for the gates described in docs/QUALITY_GATES.md. tools/quality/run-gates.sh (AR-0006) is the only intended consumer. Every version here was observed on the development box by running the tool; every digest here was verified by downloading the asset and hashing it.",
+
+  "rust": {
+    "toolchain": "1.98.1",
+    "_toolchain_note": "rustc 1.98.1 (48a229cea 2026-09-01) / cargo 1.98.1 (797e8a9bc 2026-08-05). AR-0005 owns writing this same value into rust-toolchain.toml; until that file exists the runner must select the toolchain explicitly.",
+    "components": ["rustfmt", "clippy", "llvm-tools-preview"],
+    "cargo_nextest": "0.9.143",
+    "cargo_deny": "0.20.2",
+    "cargo_audit": "0.22.2",
+    "cargo_llvm_cov": "0.9.1"
+  },
+
+  "coverage": {
+    "_note": "Measured floors, not aspirations. AR-0009 measured this workspace on the pinned toolchain at commit c839d31ca7769412ea5e7b8d71543f295d69e0cb with the command in `measured_command`, and reproduced the same numbers with a second run of that command at the same revision. Each floor is the measured figure less one slack, rounded down to the nearest half point, where the slack is the larger of half a point and ten covered lines: enough headroom that an honest refactor does not turn the gate red on arrival, little enough that a real regression trips it. See `_slack_rule` for why the line term exists and `_floor_baseline_guard` for what stops a floor drifting from the baseline beside it. The runner still treats a null floor as 'not yet armed' rather than a pass; that behaviour is not removed by arming the gate.",
+    "_what_this_is_not": "Coverage is a regression constraint and not evidence of correctness. These percentages establish which lines were executed by the test suite, and nothing whatever about whether the behaviour those lines implement is right. Do not raise a floor because a higher number reads better, and do not lower a floor, exclude production code from the denominator, or re-measure a baseline in order to make a failing run pass. The way to move a floor up is to add tests and re-measure.",
+
+    "measured_at_commit": "c839d31ca7769412ea5e7b8d71543f295d69e0cb",
+    "measured_command": "cargo llvm-cov --locked --workspace --summary-only --json",
+    "measured_on": "2026-09-08",
+    "measured_workspace": {
+      "lines": 85.0649,
+      "lines_total": 17730,
+      "regions": 87.1892,
+      "functions": 87.9981,
+      "_source": "totals of the report the command above wrote: lines 15082/17730, regions 27979/32090, functions 1833/2083. 378 tests passed, 8 ignored."
+    },
+
+    "workspace_lines": 84.5,
+    "critical_lines": 76.0,
+    "_critical_lines_note": "The floor applied to any critical package that does not carry its own `floor_lines`. It is the weakest floor in the set, so it is a backstop and not the operative number for a package that has one; the per-package floors below are what actually constrain each crate. Every entry below carries its own floor today, so this constrains nothing until one does not.",
+    "critical_packages": [
+      {
+        "name": "peano",
+        "measured_lines": 78.1563,
+        "measured_lines_total": 499,
+        "floor_lines": 76.0,
+        "reason": "The numeric tower every other crate is generic over: Peano naturals, length-typed vectors and the AbelianGroup/Ring/Commutative/Scalar trait chain, so a regression here is a regression everywhere.",
+        "_caveat": "The lowest-covered crate in the critical set at 390/499 lines. A floor at 76.0 forbids further slippage; it does not assert that peano is well tested, and it should be raised as tests are added rather than left as a permanent statement about this crate.",
+        "_slack_note": "This is the crate that forced the slack rule. At half a point the floor would be 77.5, which peano reds by losing three covered lines out of 499 -- one deleted tested helper. That is a false red, and the obvious way to clear a false red is to lower the floor, which is precisely the slackening the baseline guard now refuses. So the slack is the larger of half a point and ten lines: here ten lines is 2.004 points, and the floor is 76.0 with 10.8 lines of room."
+      },
+      {
+        "name": "clifford",
+        "measured_lines": 91.2486,
+        "measured_lines_total": 2651,
+        "floor_lines": 90.5,
+        "reason": "The algebra substrate: Mv<A, S>, the pga3 physics facade (Motor, Twist, Wrench, Point, Line, Plane) and forward-mode AD, which every dynamics result is computed in."
+      },
+      {
+        "name": "aristotle",
+        "measured_lines": 94.8007,
+        "measured_lines_total": 577,
+        "floor_lines": 93.0,
+        "reason": "World state and the storage under it, and the only crate in the workspace with a meaningful amount of executable unsafe: 13 of the 17 `unsafe { }` blocks that exist anywhere here, the other 4 being in newton, which is already in this set.",
+        "_why_added_later": "Left out of the initial set on the grounds that the plan named three crates. That was deference to the plan's wording rather than a technical judgement -- the plan says `considering` the numeric tower, the algebra substrate and the dynamics core, not `restricted to` -- and on review the technical case is strong enough to override it. Counted rather than assumed: separating executable `unsafe { }` blocks from `unsafe impl` marker traits, which are layout assertions with no runtime line for coverage to reach, the workspace has 17 executable blocks and aristotle holds 13. clifford's 18 unsafe tokens and peano's 5 are every one of them `unsafe impl Zeroable/Pod`, so coverage is structurally incapable of saying anything about them. Adding aristotle takes this set from 4 of those 17 blocks to all 17.",
+        "_what_the_unsafe_does": "RawMap::write_at at crates/aristotle/src/world.rs:200 writes through a raw pointer while taking `&self`, licensed solely by a one-writer-per-slot invariant that the type system does not enforce and that ACCELERATOR.md records as documented-but-unenforced. A regression constraint is worth most exactly where an invariant is unenforced, because there the tests are the only thing standing behind it.",
+        "_caveat": "At 577 lines this is the second-smallest crate in the set, and under a half-point rule its floor would carry 1.6 lines of slack -- tighter than peano's three, and a false red waiting to happen. It is in the set only because the slack is now the larger of half a point and ten lines, which gives it 10.4."
+      },
+      {
+        "name": "newton",
+        "measured_lines": 95.4943,
+        "measured_lines_total": 6858,
+        "floor_lines": 94.5,
+        "reason": "The dynamics core: rigid bodies, mechanisms, force fields, the explicit and implicit integrators, the GPU accelerator front end and the build-time GLSL codegen; it is the largest crate in the workspace and the one the simulation's answers come from."
+      }
+    ],
+    "_critical_set_note": "Four crates, chosen as the substrate the rest of the workspace stands on rather than as the four best numbers -- two of them, peano at 78.16 and aristotle at 94.80, are not the workspace's best figures and were picked for what they carry. Considered and not included, with their measured line coverage at the same commit: viete 90.11 (the symbolic tracer), joints 87.00 (the two-body force laws), hitchcock 48.59 (work in progress), melies 10.65 (an examples host, not on the engine path). Deliberately not included: functions, measured 0.00 percent over 149 lines - its scalar-generic solver bodies are traced into GLSL by newton/build.rs at build time and are never executed by an instrumented test binary, so a floor there would either be zero, which constrains nothing, or a fiction. That gap is real and is recorded here rather than hidden by picking a flattering figure. Named so that this enumeration accounts for every workspace member and not only the flattering ones: borges, gates and ligeti each measure 100.00 percent over 7 lines, being unmodified `cargo new` placeholders whose entire content is an `add` function and the test that adds 2 and 2 -- a floor there would constrain a stub rather than the engine, and a 100 percent figure over 7 lines is not evidence of anything; and experiments/vulkano-test measures 0.00 percent over 226 lines, a device smoke-test binary with no library tests.",
+
+    "_workspace_denominator_note": "The workspace floor is measured over every member, `experiments/*` included, and nothing is excluded from the denominator. functions (149 lines) and experiments/vulkano-test (226 lines) are wholly unreachable by an instrumented test binary, so about 2.1 percent of the 17730-line denominator is code no test can cover. The floor is deliberately set from the figure that still counts them, so that it stays comparable run to run: excluding them later would raise the measured percentage without a single new test, and must be paired with a re-measured floor rather than be allowed to read as an improvement.",
+
+    "_reproduction": "Re-measured independently on 2026-09-09 by a second worker at commit fe440f869035d413b29f60fb3cb70b75e672e036, whose crates/ tree is identical to c839d31ca7769412ea5e7b8d71543f295d69e0cb -- this branch changes only config/, docs/ and tools/quality/. The command in `measured_command` was run twice on the same host and device; the two reports were byte-identical to each other (sha256 1c7231561c587335e400a525e22f9a6ec030f614280ee06def47f73a6d60296f) and reproduced every figure recorded above -- workspace totals, all three critical-crate numbers, and each crate named in `_critical_set_note` -- with 378 tests passed and 8 ignored in each run. The branches block counted 0/0 in both.",
+
+    "_slack_rule": "floor = round_down_to_half_point(measured - max(0.5 points, 10 lines)). The line term is there because a percentage is not scale-invariant and the floors it produced were not comparable to each other. Half a point of the 17730-line workspace is 89 lines, of newton 34, of clifford 13 -- and of the 499-line peano, 3. peano would have gone red on losing three covered lines, which is one deleted tested helper: a false red that nobody would call a regression, whose obvious remedy is lowering the floor. A rule that manufactures pressure to lower floors is a bad rule in a repository whose whole thesis is that floors must not be lowered quietly. Ten lines is a judgement and not a measurement: it is roughly one small function with its body, and below that this gate is measuring churn rather than regression. It binds only the two small crates -- peano at 2.004 points and aristotle at 1.733 -- and leaves clifford, newton and the workspace exactly where the half-point rule had them, so it loosens nothing that was working.",
+
+    "_floor_baseline_guard": "check_coverage.py refuses a floor that its own recorded baseline does not license: below `measured_lines - slack` it exits 2, and so does a floor above `measured_lines`, which would be an aspiration rather than a measurement. This exists because `measured_lines` was previously required, validated and printed, and then read by nothing: every floor here could be set to 0.0 and the gate would pass, printing the manifest's own measured figures one line above the pass. `Do not lower a floor to make a run pass` was enforced by prose alone, in a repository whose thesis is that an unenforced rule will not hold. Be exact about the reach of the fix: it makes a silent slackening impossible, because lowering a floor now requires lowering the baseline beside it, and that is a claim about the world that sits in the diff where a reviewer reads it. It cannot decide whether the claim is honest -- re-measuring after a coverage loss you accept and re-measuring to launder a failure are the same edit. The gate makes the edit visible; judging it stays review's job, and no threshold can take that over.",
+
+    "branch_coverage_available": false,
+    "_branch_note": "cargo-llvm-cov on the pinned stable toolchain reports line, region and function coverage and NOT branch coverage. This is not an omission in the floors: the report the command above produces carries a branches block whose count is 0, so there is no branch figure to compare against. Obtaining one would need a nightly toolchain and `cargo llvm-cov --branch`, which contradicts the pin in rust-toolchain.toml and config/quality-tools.json rust.toolchain; arming a branch floor is therefore a toolchain decision, not a threshold decision. The coordinator repository's own 95 percent branch floor is a Python coverage.py figure and does not transfer here.",
+
+    "_device_note": "Every figure here is conditional on a Vulkan compute device being present. crates/newton/build.rs opens one at build time with no fallback, so the workspace cannot be compiled - let alone measured - without one, and the GPU-backed paths that a device makes reachable are part of the denominator and the numerator alike. The baseline above was measured on an AMD Radeon RX 9060 XT (RADV GFX1200), Mesa 26.2.2, Vulkan 1.4.354. A measurement taken on a different device, or with GPU tests unreachable, is not comparable to these floors."
+  },
+
+
+  "external": {
+    "_note": "Downloaded over HTTPS from the named repository's release assets, digest-verified before extraction, executed from throwaway storage. A digest mismatch aborts the run; it is never a warning. Digests below are the upstream agent-systems-benchmark values, independently re-verified for this repository on 2026-09-07 by downloading each asset and comparing sha256sum -c: all six matched, and a deliberately corrupted line was rejected.",
+    "digests_verified_on": "2026-09-07",
+    "_shellcheck_added_note": "shellcheck was added on 2026-09-09 by AR-0016 and is not one of those six. Its two digests were obtained the same way -- download the asset, sha256sum it -- and the linux_x86_64 value independently matches the pin an unrelated project carries for the same asset. Its assets are .tar.xz where the other three are .tar.gz, which is why the installer detects the compression rather than assuming gzip.",
+    "actionlint": {
+      "version": "1.7.12",
+      "repository": "rhysd/actionlint",
+      "linux_x86_64": {
+        "asset": "actionlint_1.7.12_linux_amd64.tar.gz",
+        "sha256": "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+      },
+      "linux_aarch64": {
+        "asset": "actionlint_1.7.12_linux_arm64.tar.gz",
+        "sha256": "325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6"
+      }
+    },
+    "zizmor": {
+      "version": "1.30.0",
+      "repository": "zizmorcore/zizmor",
+      "linux_x86_64": {
+        "asset": "zizmor-x86_64-unknown-linux-gnu.tar.gz",
+        "sha256": "ec8c95cd800845abb9bbc5f377ec7c57d2eb8e2386a00a201d3a74ee4092e5ed"
+      },
+      "linux_aarch64": {
+        "asset": "zizmor-aarch64-unknown-linux-gnu.tar.gz",
+        "sha256": "018a024d6b6d09733b07f6ef42838d984c23ec04bc9b2acd55f7d67826aeafe5"
+      }
+    },
+    "shellcheck": {
+      "_note": "Not a gate of its own. actionlint lints the shell inside every workflow `run:` block by delegating to shellcheck, and disables that delegation *without a diagnostic* when the binary is not on PATH -- no warning, no note, exit 0. Unpinned, gate 8 therefore reported a pass over shell it had never read. Pinned here so the shell is actually linted, and so that a substituted binary fails closed like the other three rather than degrading into a silent skip.",
+      "version": "0.11.0",
+      "repository": "koalaman/shellcheck",
+      "linux_x86_64": {
+        "asset": "shellcheck-v0.11.0.linux.x86_64.tar.xz",
+        "sha256": "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198"
+      },
+      "linux_aarch64": {
+        "asset": "shellcheck-v0.11.0.linux.aarch64.tar.xz",
+        "sha256": "12b331c1d2db6b9eb13cfca64306b1b157a86eb69db83023e261eaa7e7c14588"
+      }
+    },
+    "gitleaks": {
+      "version": "8.30.1",
+      "repository": "gitleaks/gitleaks",
+      "linux_x86_64": {
+        "asset": "gitleaks_8.30.1_linux_x64.tar.gz",
+        "sha256": "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+      },
+      "linux_aarch64": {
+        "asset": "gitleaks_8.30.1_linux_arm64.tar.gz",
+        "sha256": "e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080"
+      }
+    }
+  },
+
+  "actions": {
+    "_note": "AR-0008 owns .github/workflows/ and fills this map with full commit ids for every action it references. It is empty because the product repository has no workflows yet; an empty map is not a claim that none are needed."
+  },
+
+  "graphics": {
+    "_note": "Not a gate pin. Recorded here because the gate runner must report it: crates/newton/build.rs opens a Vulkan compute device at build time and has no fallback, so every gate that compiles the workspace needs one. The runner reports the device it used, and refuses rather than skipping if there is none.",
+    "api": "vulkan",
+    "rust_binding": "vulkano",
+    "build_time_device_required": true
+  }
+}

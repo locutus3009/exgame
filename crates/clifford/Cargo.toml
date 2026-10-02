@@ -1,0 +1,20 @@
+[package]
+name = "clifford"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+license = "MIT"
+# Nothing here is published. Stated so that cargo-deny's wildcard rule can
+# tell an internal path dependency from a real `*` requirement.
+publish = false
+
+[dependencies]
+bytemuck = "1.25.1"
+num-traits = { version = "0.2.19", default-features = false, features = [ "libm" ] }
+peano = { path = "../peano" }
+
+[dev-dependencies]
+num-rational = "0.4.2"
+
+[lints]
+workspace = true

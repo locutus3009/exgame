@@ -1,0 +1,60 @@
+# Exclusions for `cargo audit` — gate 6 of docs/QUALITY_GATES.md.
+#
+# cargo-audit does not read deny.toml, so this file exists to keep the two tools
+# from disagreeing about the same dependency graph. Every id here is either in
+# deny.toml's `[advisories] ignore` with the same reasoning, or is noted there as
+# belonging only to this file. Adding an id in one place and not the other is the
+# mistake this comment exists to prevent.
+#
+# An exclusion with no stated reason is the same false green this milestone
+# exists to eliminate, so each entry below carries three things: the affected
+# crate, why it is not exploitable here, and WHAT WOULD MAKE THE EXCLUSION
+# INVALID. The last one is what stops the list becoming permanent.
+#
+# All four reach the tree through exactly one edge: `winit 0.30.13`, depended on
+# only by `gates` (a `cargo new` stub) and `melies` (the wgpu example host).
+# None is on the engine path — `newton`, `aristotle`, `rembrandt`, `viete`,
+# `clifford`, `peano`, `joints` and `functions` do not pull winit — and none has
+# an upgrade reachable without a semver-major bump of winit itself.
+#
+# REVISIT ALL FOUR when winit is upgraded past 0.30, when any engine-path crate
+# gains a winit dependency, or when `melies` stops being examples-only.
+[advisories]
+ignore = [
+  # RUSTSEC-2026-0194 — quick-xml 0.39.4, quadratic duplicate-attribute check.
+  # Reached only through wayland-scanner, which parses the Wayland protocol XML
+  # shipped inside the wayland-protocols crates, at build time. That input is
+  # fixed and first-party to those crates; this workspace parses no XML at run
+  # time and accepts none from any source. It is a DoS on untrusted input, and
+  # there is no untrusted input.
+  # INVALID IF: anything here parses XML at run time, or wayland-scanner accepts
+  # quick-xml >= 0.41 (the fix), which 0.31.10 does not.
+  "RUSTSEC-2026-0194",
+
+  # RUSTSEC-2026-0195 — quick-xml 0.39.4, unbounded namespace-declaration
+  # allocation in `NsReader`. Same crate, same single consumer, same fixed
+  # build-time input and same unavailable upgrade as RUSTSEC-2026-0194.
+  # INVALID IF: as above.
+  "RUSTSEC-2026-0195",
+
+  # RUSTSEC-2026-0192 — ttf-parser 0.25.1 is unmaintained. Not a vulnerability:
+  # no exploitable defect is claimed. Reached through
+  # winit -> sctk-adwaita -> ab_glyph -> owned_ttf_parser, the client-side
+  # window decorations on Wayland. The advisory states outright that no safe
+  # upgrade exists; the alternative it names (skrifa) is a change ab_glyph would
+  # have to make.
+  # INVALID IF: an exploitable advisory is issued against ttf-parser, or
+  # ab_glyph migrates and a version bump becomes reachable.
+  "RUSTSEC-2026-0192",
+
+  # RUSTSEC-2026-0186 — memmap2 0.9.10, unchecked pointer offset. Unsound rather
+  # than a known exploit. Reached through winit and smithay-client-toolkit for
+  # the Wayland shared-memory buffers, the same decorations path. Nothing in
+  # this workspace calls memmap2 directly.
+  # Listed ONLY here: cargo-deny does not raise this one under deny.toml's
+  # configuration, so an entry there would produce an `advisory-not-detected`
+  # warning rather than suppressing anything.
+  # INVALID IF: a first-party crate takes a direct memmap2 dependency, or the
+  # advisory is upgraded to a vulnerability with a fixed version available.
+  "RUSTSEC-2026-0186",
+]

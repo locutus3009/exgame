@@ -1,0 +1,236 @@
+# DORMANT. This workflow cannot run and must not be enabled as written. It is kept in tree,
+# pinned and analysed on every gate run, so that enabling it later is a configuration change
+# rather than a project.
+#
+# ---------------------------------------------------------------------------------------------
+# WHY IT IS DORMANT
+#
+# A hosted runner cannot build this workspace. Not "builds slowly", not "builds without the GPU
+# features": the build fails outright, before any test runs, because a Vulkan compute device is
+# required at BUILD time and there is no fallback and no feature gate.
+#
+# The chain, at this revision, file and line:
+#
+#   crates/newton/build.rs:1689      fn main() — the build script every `cargo build` of the
+#                                    `newton` crate runs, unconditionally
+#   crates/newton/build.rs:771       build_joint_sym(build_world(), v) — reached from main()
+#                                    through generate_jacobian()
+#   crates/newton/build.rs:542       fn build_world()
+#   crates/newton/build.rs:544       World::builder()
+#   crates/aristotle/src/world.rs:468  pub fn builder() -> WorldBuilder
+#   crates/aristotle/src/world.rs:469  let gpu = Arc::new(GpuAccelerator::new());
+#   crates/rembrandt/src/lib.rs:98   pub fn new() -> Self
+#   crates/rembrandt/src/lib.rs:99   VulkanLibrary::new().expect("no Vulkan library")
+#   crates/rembrandt/src/lib.rs:107  Instance::new(...).expect("failed to create instance")
+#
+# Line 99 is the first of six consecutive `.expect()` calls with no fallback path. Line 107 is
+# the one a hosted runner actually hits: the GitHub-hosted `ubuntu-24.04` image ships a Vulkan
+# loader but no ICD, so the library loads and instance creation fails. None of the six messages
+# mentions a build, which is why this failure is worth naming here rather than leaving to be
+# rediscovered.
+#
+# `docs/QUALITY_GATES.md` records the same precondition under "The Vulkan precondition", and
+# `README.md` under "Build". Note that both quote slightly different line numbers
+# (`crates/newton/build.rs:541`, `crates/aristotle/src/world.rs:467`,
+# `crates/rembrandt/src/lib.rs:91`); the numbers above were read from this revision. Neither
+# document is owned by this file's author, so the divergence is recorded rather than corrected.
+#
+# The consequence is that `tools/quality/run-gates.sh` — invoked below — refuses to run at all on
+# a machine with no device, by design: "no Vulkan device: this workspace cannot be built, and
+# refusing is the only honest result". A hosted run of this workflow would therefore not produce
+# a weaker green; it would produce a red that says nothing about the revision. The local gate
+# runner is this project's authority for exactly that reason.
+#
+# ---------------------------------------------------------------------------------------------
+# WHAT MUST CHANGE TO ENABLE IT
+#
+# Three things, in this order. The first two are outside this file.
+#
+#   1. A runner with a Vulkan compute device. Either a self-hosted runner with a GPU and an ICD,
+#      or a hosted runner plus a software ICD (lavapipe / `mesa-vulkan-drivers`) installed before
+#      the build. The second has never been tried on this workspace and would need its own
+#      evidence: `vulkaninfo --summary` reporting a device is necessary and not sufficient, since
+#      `run-gates.sh` records the selected device's type and a software rasteriser produces
+#      different numbers from the ones every recorded gate run was measured on.
+#
+#      Do not solve this by giving `newton/build.rs` a CPU fallback in order to make CI green.
+#      That would change what the gates certify, which is a decision for `docs/QUALITY_GATES.md`,
+#      not for a workflow file.
+#
+#   2. `docs/QUALITY_GATES.md` gate 11 and `tools/quality/repository_policy.py`
+#      (`FORBIDDEN_TRIGGERS`) currently forbid EVERY workflow in this repository from triggering
+#      on push, pull request or schedule, because "dormant" is defined there and enforced as a
+#      repository-wide property rather than per file. Enabling any workflow makes gate 11 fail
+#      until that rule is narrowed. That interlock is deliberate: it means a workflow cannot be
+#      quietly woken up.
+#
+#   3. In THIS file, and nothing else in it: replace the `"on":` block below with real triggers.
+#      No other edit is needed — no step, permission, runner label or action pin has to change.
+#      That property was demonstrated on a scratch branch and is what "dormant by configuration"
+#      is supposed to mean here.
+#
+# ---------------------------------------------------------------------------------------------
+# WHAT THIS WORKFLOW WOULD DO IF ENABLED
+#
+# It runs the local gate runner, unmodified, against the pushed commit, and mirrors nothing by
+# hand. `run-gates.sh` enumerates the fifteen gates of `docs/QUALITY_GATES.md`, runs every one of
+# them whatever fails, and writes one JSON report. Reimplementing that sequence step by step in
+# YAML would produce a second definition of the gate list that could drift from the first; the
+# runner's own `--list-gates` is the enumeration AR-0007's fixture suite reads, and this file
+# deliberately does not compete with it.
+name: Quality gates (dormant)
+
+# DORMANT. `workflow_dispatch` is the only trigger, so nothing here starts on its own: no push,
+# no pull request, no schedule, no `workflow_call`. On a private repository with no enabled
+# workflow file this is not even offered in the UI. `tools/quality/repository_policy.py` checks
+# this block on every gate run and fails if a forbidden trigger appears.
+"on":
+  workflow_dispatch:
+
+# No permissions at the top level, so every job starts from nothing and adds back only what it
+# needs. `contents: read` on the job below is the whole of it: this workflow reads a revision and
+# writes nothing to the repository, publishes no package and creates no release.
+permissions: {}
+
+concurrency:
+  group: quality-gates-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  gates:
+    # Every gate, against one exact commit, from a clean machine.
+    name: Fifteen gates at an exact revision
+    # A pinned disposable hosted image, never `ubuntu-latest` and never `self-hosted`. Pinned
+    # because `latest` moves and a gate that changes answer without the tree changing is not a
+    # gate. See the note above about what a device-bearing runner would have to be instead: that
+    # substitution is step 1 of enabling this file and is not a label change alone.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # Pinned by full commit id, never by tag: a tag can be moved under you. The trailing
+      # comment records which release that commit was, and is a comment — the commit id is what
+      # runs. `tools/quality/repository_policy.py` rejects anything but a 40-character commit id.
+      # `persist-credentials: false` keeps the job's token out of `.git/config`, where a later
+      # step or a compromised dependency could read it. fetch-depth 0 because the commit and
+      # policy gates need the introduced range and the base it was branched from.
+      - name: Check out the revision under test
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      # Everything run-gates.sh insists on before it will start: it checks for git, python3,
+      # curl, tar, sha256sum, gpg, cargo, rustup and vulkaninfo and dies naming the first one
+      # missing. vulkan-tools supplies vulkaninfo; python3-yaml is what gate 11 imports, and that
+      # gate fails closed rather than skipping when it is absent, so it is installed deliberately
+      # here rather than left to chance. Note what is NOT installed: a Vulkan ICD. Installing the
+      # loader does not conjure a device, and the next step is what says so.
+      - name: Install the runner's system prerequisites
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends vulkan-tools python3-yaml gnupg
+
+      # This step is the point of the whole file. It fails on a stock hosted runner, and it is
+      # placed before the toolchain install so that it fails in seconds rather than after ten
+      # minutes of compiling: see the header for the chain of `.expect()` calls it stands in for.
+      # It is not a gate — run-gates.sh treats the device as a precondition, not as something a
+      # revision can pass or fail — and it must never be softened into a warning.
+      - name: Refuse to continue without a Vulkan compute device
+        run: |
+          set -euo pipefail
+          if ! vulkaninfo --summary 2>/dev/null | grep -q 'deviceName'; then
+            echo "::error::no Vulkan device on this runner. crates/newton/build.rs:1689 reaches"
+            echo "::error::crates/rembrandt/src/lib.rs:99 at build time and has no fallback."
+            exit 1
+          fi
+          vulkaninfo --summary 2>/dev/null | sed -n '/deviceName/p'
+
+      # rustup is preinstalled on the hosted image; rust-toolchain.toml pins the channel and the
+      # components, and run-gates.sh refuses to continue if what is installed disagrees with
+      # config/quality-tools.json. Nothing is pinned twice here, so nothing can drift here.
+      - name: Install the pinned toolchain
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+          cargo --version
+
+      # Versions come from the manifest rather than from literals in this file, for the same
+      # reason: run-gates.sh compares each subcommand against the manifest and dies on a
+      # mismatch, so a literal here would be a second pin that could disagree with the first.
+      - name: Install the pinned cargo subcommands
+        run: |
+          set -euo pipefail
+          version() {
+            python3 -c 'import json,sys; print(json.load(open("config/quality-tools.json", encoding="utf-8"))["rust"][sys.argv[1]])' "$1"
+          }
+          cargo install --locked "cargo-deny@$(version cargo_deny)"
+          cargo install --locked "cargo-audit@$(version cargo_audit)"
+          cargo install --locked "cargo-llvm-cov@$(version cargo_llvm_cov)"
+
+      # `run-gates.sh --base` defaults to `origin/main`, and that ref is not reliably present in
+      # an Actions checkout: `actions/checkout` fetches the refs it needs for the event, so on a
+      # branch build `refs/remotes/origin/main` may simply not exist and the runner would die
+      # with "unknown base revision" before a single gate ran. Fetching it here is not an option
+      # worth taking either — `persist-credentials: false` above is a deliberate security
+      # property and re-authenticating a fetch to undo it would trade a real one for a
+      # convenience. So the base is resolved from what the event already provides, in descending
+      # order of precision, and the step fails closed rather than letting the runner pick a
+      # default that is not there. This step is why enabling this file needs no edit but the
+      # trigger block.
+      #
+      # UNTESTED, and said plainly: no run of this workflow has ever happened, so which candidate
+      # actually resolves on each event is reasoned from the checkout action's documented
+      # behaviour rather than observed. The failure mode is loud — a named error and a red run —
+      # not a silently empty range, because `check_commits.py` fails an empty range by design.
+      - name: Resolve the base of the introduced range
+        id: range
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          resolves() {
+            test -n "${1:-}" && git rev-parse --verify --quiet "${1}^{commit}" >/dev/null
+          }
+          base=""
+          # The pull request's own base, then the pushed range's start, then main, then the first
+          # parent — which is the right answer for a merge commit and the runner's own advice for
+          # a post-merge run.
+          for candidate in "$PR_BASE" "$PUSH_BEFORE" origin/main HEAD^1; do
+            if resolves "$candidate"; then
+              base="$(git rev-parse "$candidate")"
+              echo "base ${base} resolved from ${candidate}"
+              break
+            fi
+          done
+          if test -z "$base"; then
+            echo "::error::no base commit is present in this checkout; refusing to gate an unknown range"
+            exit 1
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+
+      # The runner downloads actionlint, zizmor and gitleaks itself, digest-verified against the
+      # manifest before extraction, and runs every gate whatever fails.
+      - name: Run every gate against this commit
+        env:
+          REVISION: ${{ github.sha }}
+          RANGE_BASE: ${{ steps.range.outputs.base }}
+        run: tools/quality/run-gates.sh "$REVISION" --base "$RANGE_BASE" --report gate-report.json
+
+      # The report is the evidence, and it is written to be publishable: run-gates.sh runs it
+      # through tools/quality/privacy.py and refuses to emit one that carries an absolute home
+      # path or a credential. Uploaded on failure too, because a red run is when it is needed.
+      - name: Keep the report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gate-report
+          path: gate-report.json
+          if-no-files-found: error

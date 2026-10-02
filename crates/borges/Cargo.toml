@@ -1,0 +1,14 @@
+[package]
+name = "borges"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+license = "MIT"
+# Nothing here is published. Stated so that cargo-deny's wildcard rule can
+# tell an internal path dependency from a real `*` requirement.
+publish = false
+
+[dependencies]
+
+[lints]
+workspace = true

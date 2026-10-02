@@ -1,0 +1,17 @@
+[package]
+name = "rembrandt"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+license = "MIT"
+# Nothing here is published. Stated so that cargo-deny's wildcard rule can
+# tell an internal path dependency from a real `*` requirement.
+publish = false
+
+[dependencies]
+bytemuck = { version = "1.25.2", features = ["derive"] }
+vulkano = { version = "0.35.2", default-features = false, features = ["macros"] }
+vulkano-shaders = "0.35.0"
+
+[lints]
+workspace = true

@@ -1,0 +1,20 @@
+[package]
+name = "melies"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+license = "MIT"
+# Nothing here is published. Stated so that cargo-deny's wildcard rule can
+# tell an internal path dependency from a real `*` requirement.
+publish = false
+
+[dependencies]
+async-trait = "0.1.91"
+bytemuck = "1.25.0"
+pollster = "0.4.0"
+wgpu = "29.0.3"
+winit = "0.30.13"
+tokio = { version = "1.53.1", features = ["full"] }
+
+[lints]
+workspace = true

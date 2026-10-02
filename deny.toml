@@ -1,0 +1,129 @@
+# Dependency policy for `cargo deny --locked check` — gate 5 of
+# docs/QUALITY_GATES.md. Written for cargo-deny 0.20.2, the version pinned in
+# config/quality-tools.json.
+#
+# The rule this file follows: an exception is narrow, named and carries its
+# reason here. Widening a policy so that a finding disappears is the failure
+# mode this gate exists to prevent, so every `skip`/`ignore` below names an
+# exact crate or advisory and says why.
+#
+# Everything below was measured on this workspace at the commit that added the
+# file, not copied from a template.
+
+[graph]
+# No `targets` filter, deliberately. Restricting to x86_64-unknown-linux-gnu —
+# the only platform this workspace can currently build on, because the
+# accelerator needs a Vulkan compute device at BUILD time (see README.md) —
+# would drop the Windows and Apple dependency trees out of the licence and
+# advisory check entirely. A licence obligation does not become irrelevant
+# because today's development box cannot compile that branch of the graph, so
+# the policy covers the whole resolved graph and the skip list below is
+# correspondingly longer.
+#
+# `all-features` so that viete's `lua`, peano's `fixed` and aristotle's
+# `tracked-access` are all in scope. Dev-dependencies are in scope by default,
+# which matters: `melies` is a dev-dependency of `newton` and `hitchcock`, and
+# it is where the whole winit subtree — and every advisory below — enters.
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+unmaintained = "all"
+
+# REVISIT EVERY ENTRY BELOW when winit is upgraded past 0.30, when any
+# engine-path crate gains a winit dependency, or when `melies` stops being
+# examples-only. An exclusion with no stated expiry condition becomes permanent
+# by default, which is the failure this milestone exists to remove.
+#
+# Three advisories, all reached through exactly one edge: `winit 0.30.13`, which
+# only `gates` (a `cargo new` stub) and `melies` (the wgpu example host) depend
+# on. None is on the engine path — `newton`, `aristotle`, `rembrandt`, `viete`,
+# `clifford`, `peano`, `joints` and `functions` do not pull winit — and none has
+# an upgrade reachable without a semver-major bump of winit itself, which this
+# workspace does not control.
+#
+# Each entry is a single advisory id. Deleting the `gates`/`melies` winit
+# dependency would remove all three; that is a scope decision, not a lint fix.
+#
+# A fourth, RUSTSEC-2026-0186 (memmap2, unsound), reaches the tree through the
+# same winit edge but is NOT one cargo-deny raises under this configuration, so
+# listing it here would only produce an `advisory-not-detected` warning. It is
+# carried in `.cargo/audit.toml`, which is where cargo-audit reads its
+# exclusions, with the same reasoning.
+ignore = [
+  { id = "RUSTSEC-2026-0194", reason = "quick-xml quadratic attribute-duplicate check. Reached only through wayland-scanner, which parses the Wayland protocol XML shipped inside the wayland-protocols crates at build time. The input is fixed and first-party to those crates; this workspace parses no XML at run time and accepts none from anywhere. Fix is quick-xml >= 0.41, which wayland-scanner 0.31.10 does not accept." },
+  { id = "RUSTSEC-2026-0195", reason = "quick-xml unbounded namespace-declaration allocation in NsReader. Same crate, same single consumer, same fixed build-time input, same unavailable upgrade as RUSTSEC-2026-0194." },
+  { id = "RUSTSEC-2026-0192", reason = "ttf-parser is unmaintained. Not a vulnerability. Reached via winit -> sctk-adwaita -> ab_glyph -> owned_ttf_parser, the client-side window decorations on Wayland. The advisory states outright that no safe upgrade exists; the alternative it names (skrifa) is a change ab_glyph would have to make." },
+]
+
+[licenses]
+version = 2
+# Every expression in the graph resolves against this list; it was built by
+# enumerating what is actually there, not by copying a permissive set. No
+# copyleft term is accepted: r-efi offers `MIT OR Apache-2.0 OR
+# LGPL-2.1-or-later` and is satisfied by the first two, so LGPL is not allowed
+# and does not need to be.
+allow = [
+  "MIT",              # the bulk, and this workspace's own licence
+  "Apache-2.0",       # the other half of the usual MIT/Apache-2.0 dual offer
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",     # arrayref
+  "BSD-3-Clause",     # tiny-skia, tiny-skia-path
+  "ISC",              # libloading
+  "Zlib",             # foldhash, slotmap; also bytemuck's third option
+  "Unicode-3.0",      # the AND term of unicode-ident
+  "CC0-1.0",          # hexf-parse
+  "Unlicense",        # the OR term of memchr, walkdir, same-file, termcolor
+]
+# `dpi` is `Apache-2.0 AND MIT`, needing both — both are allowed, so it passes
+# without an exception. `unicode-ident` is `(MIT OR Apache-2.0) AND Unicode-3.0`
+# for the same reason.
+confidence-threshold = 0.93
+
+[bans]
+# Rejects a second major version of the same crate. Fifteen already exist, every
+# one of them a transitive split this workspace does not choose; they are listed
+# individually below so that a SIXTEENTH fails the gate. The alternative —
+# `multiple-versions = "warn"` — would make the gate unable to reject anything,
+# which docs/QUALITY_GATES.md says it must be able to do.
+multiple-versions = "deny"
+wildcards = "deny"
+# The 31 `{ path = "../x" }` dependencies between the workspace's own crates
+# carry no version requirement, which cargo reads as `*`. This flag exempts a
+# wildcard whose dependency is a path AND whose package is unpublishable; every
+# member declares `publish = false`, which is simply true — nothing here goes to
+# a registry. A `*` on a crates.io dependency is still rejected.
+allow-wildcard-paths = true
+
+# Each entry skips the OLDER version of a pair the graph already contains, so
+# the newer one remains the only accepted one and a new split fails. Every one
+# of these enters through winit/wgpu/vulkano; none is a first-party choice.
+skip = [
+  { crate = "bitflags@1.3.2", reason = "wgpu-hal and vulkano-era crates still on 1.x" },
+  { crate = "block2@0.5.1", reason = "objc2 0.5 half of the Apple-frameworks split" },
+  { crate = "foldhash@0.1.5", reason = "hashbrown 0.15's hasher" },
+  { crate = "hashbrown@0.15.5", reason = "three hashbrown majors arrive through indexmap, wgpu and std-adjacent crates" },
+  { crate = "hashbrown@0.16.1", reason = "middle of the same three-way hashbrown split" },
+  { crate = "jni-sys@0.3.1", reason = "android-activity's older jni binding" },
+  { crate = "linux-raw-sys@0.4.15", reason = "pulled by rustix 0.38" },
+  { crate = "objc2@0.5.2", reason = "winit 0.30 is on objc2 0.5, newer crates on 0.6" },
+  { crate = "objc2-foundation@0.2.2", reason = "same objc2 0.5/0.6 split" },
+  { crate = "redox_syscall@0.4.1", reason = "oldest of three redox_syscall majors" },
+  { crate = "redox_syscall@0.5.18", reason = "middle of the same three-way split" },
+  { crate = "rustc-hash@1.1.0", reason = "naga/wgpu still on 1.x" },
+  { crate = "rustix@0.38.44", reason = "older rustix behind calloop and friends" },
+  { crate = "syn@2.0.117", reason = "most derive macros are on syn 2, a few on syn 3" },
+  { crate = "thiserror@1.0.69", reason = "thiserror 1/2 split across the wgpu tree" },
+  { crate = "thiserror-impl@1.0.69", reason = "the proc-macro half of the thiserror split" },
+  { crate = "windows-sys@0.52.0", reason = "oldest of three windows-sys majors" },
+  { crate = "windows-sys@0.59.0", reason = "middle of the same three-way split" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+# crates.io only. There is no git or vendored dependency in this workspace, and
+# the empty allow-git list is what keeps it that way.
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

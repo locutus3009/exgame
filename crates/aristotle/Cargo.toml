@@ -1,0 +1,31 @@
+[package]
+name = "aristotle"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+license = "MIT"
+# Nothing here is published. Stated so that cargo-deny's wildcard rule can
+# tell an internal path dependency from a real `*` requirement.
+publish = false
+
+[features]
+default = []
+# Route every slot access back through `Subbuffer::read`/`write` instead of the
+# cached host mapping. Those check each access against vulkano's record of
+# in-flight device work, so a host touch that races the GPU comes back as
+# `HostAccessError::AccessConflict` and panics AT THE OFFENDING ACCESS rather
+# than corrupting a slot quietly. That is what the mapping gives up for speed, so
+# it is kept switchable:
+#
+#   cargo test --release --workspace --features aristotle/tracked-access
+#
+# Both paths are always compiled; the feature only decides which one runs.
+tracked-access = []
+
+[dependencies]
+peano = { path = "../peano" }
+rembrandt = { path = "../rembrandt" }
+clifford = { path = "../clifford" }
+
+[lints]
+workspace = true

@@ -1,0 +1,44 @@
+[package]
+name = "newton"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+license = "MIT"
+# Nothing here is published. Stated so that cargo-deny's wildcard rule can
+# tell an internal path dependency from a real `*` requirement.
+publish = false
+
+[dependencies]
+aristotle = { path = "../aristotle" }
+clifford = { path = "../clifford" }
+rembrandt = { path = "../rembrandt" }
+peano = { path = "../peano" }
+indexmap = "2.14.0"
+joints = { path = "../joints" }
+bytemuck = { version = "1.25.0", features = ["derive"] }
+futures = "0.3.33"
+num_cpus = { version = "1.17.0" }
+rayon = { version = "1.12.0" }
+vulkano = { version = "0.35.2", default-features = false, features = ["macros"] }
+vulkano-shaders = "0.35.0"
+tokio = { version = "1.53.1", features = ["full"] }
+async-trait = "0.1.91"
+
+[dev-dependencies]
+melies = { path = "../melies" }
+# Examples pin the concrete S = Fix<…> substrate; the `fixed` feature is unified
+# into example/test builds only, keeping it out of the newton library proper.
+peano = { path = "../peano", features = ["fixed"] }
+nalgebra = "0.35.0"
+
+[build-dependencies]
+viete = { version = "0.1.0", path = "../viete", default-features = false }
+joints = { path = "../joints" }
+clifford = { path = "../clifford" }
+peano = { path = "../peano" }
+aristotle = { path = "../aristotle" }
+bytemuck = { version = "1.25.0", features = ["derive"] }
+functions = { path = "../functions" }
+
+[lints]
+workspace = true

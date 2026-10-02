@@ -1,0 +1,59 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "experiments/*"]
+
+# Applies to every workspace member via `[package] rust-version.workspace = true`.
+# Equal to the pinned toolchain in `rust-toolchain.toml`: this workspace has only
+# ever been compiled with 1.98.1, and an untested lower floor would be a claim
+# rather than a measurement.
+[workspace.package]
+rust-version = "1.98.1"
+
+# The lint policy, declared once so that a crate added later inherits it rather
+# than starting from whatever the compiler's defaults happen to be that release.
+# Every member wires itself in with `[lints] workspace = true`; a member that
+# forgets is visible as a missing four-line block in its own manifest.
+#
+# Levels are `warn`, not `deny`. The gate is
+# `cargo clippy --locked --workspace --all-targets -- -D warnings`, which
+# promotes all of this to errors at the point where it must fail; keeping the
+# manifest at `warn` leaves a working tree usable mid-edit without anyone
+# needing to reach for a suppression to get a build.
+#
+# `priority = -1` on the group entries so that a future single-lint override
+# can win against the group it belongs to.
+[workspace.lints.rust]
+# The default-on rustc lints stay on. Listed rather than assumed, so the
+# workspace states its own answer instead of inheriting a moving one.
+rust_2018_idioms = { level = "warn", priority = -1 }
+# Edition 2024 already denies this; naming it means the answer survives an
+# edition bump. It reports nothing today, which is the point — 17 `unsafe`
+# blocks in the world storage are all inside explicit `unsafe {}`.
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+# `clippy::all` is a superset of `clippy::correctness`, so the line above does
+# not only RAISE the warn-by-default groups (style, complexity, perf) — it also
+# LOWERS `correctness`, which clippy ships as deny-by-default, down to `warn`.
+# Restated here at the default priority 0, which sorts after the group's -1 and
+# therefore wins, so a plain `cargo clippy` shows a correctness finding as
+# `error:` again and not merely as one more line in the warning stream. The gate
+# never noticed the difference — it runs `-D warnings` — but a developer would.
+correctness = "deny"
+
+# Deliberately NOT enabled, measured rather than guessed, on this tree at this
+# commit: clippy::pedantic (1019 findings), clippy::nursery (647),
+# clippy::cargo (100), rust missing_docs (511), unused_qualifications (60).
+# Turning any of them on is a task with its own budget, not a line in this one.
+
+# Benchmarks (`cargo bench`) are run with ALL static optimizations:
+# fat LTO across the whole crate graph + a single codegen unit (gives the compiler
+# the full picture for inlining/devirtualizing the hot `gp`). This makes the numbers from
+# `cargo bench` comparable and suitable for catching regressions.
+# The machine-specific `target-cpu=native` (AVX etc.) is NOT baked in here — it is
+# non-portable; enable it manually when measuring:
+#   RUSTFLAGS="-C target-cpu=native" cargo bench -p clifford
+[profile.bench]
+lto = "fat"
+codegen-units = 1

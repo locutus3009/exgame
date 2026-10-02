@@ -1,0 +1,31 @@
+[package]
+name = "viete"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+license = "MIT"
+# Nothing here is published. Stated so that cargo-deny's wildcard rule can
+# tell an internal path dependency from a real `*` requirement.
+publish = false
+
+[dependencies]
+clifford = { path = "../clifford" }
+peano = { path = "../peano" }
+num-rational = "0.4.2"
+num-traits = "0.2.19"
+mlua = { version = "0.11.6", features = ["lua54", "vendored"], optional = true }
+bytemuck = { version = "1.25.0", features = ["derive"] }
+
+[features]
+default = ["lua"]
+lua = ["dep:mlua"]
+
+# Test-only: the 24-DOF Jacobian smoke test traces a real newton joint law.
+# Dev-scoped so viete's library stays free of newton/aristotle; acyclic since
+# neither depends on viete.
+[dev-dependencies]
+joints = { path = "../joints" }
+aristotle = { path = "../aristotle" }
+
+[lints]
+workspace = true

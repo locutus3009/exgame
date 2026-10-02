@@ -1,0 +1,4 @@
+# Byte-cache directories created by importing these modules. The runner sets
+# PYTHONDONTWRITEBYTECODE so a gate run does not create them, but a developer
+# running one of these scripts by hand still will.
+__pycache__/

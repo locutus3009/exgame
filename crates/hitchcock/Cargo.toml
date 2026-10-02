@@ -1,0 +1,27 @@
+[package]
+name = "hitchcock"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+license = "MIT"
+# Nothing here is published. Stated so that cargo-deny's wildcard rule can
+# tell an internal path dependency from a real `*` requirement.
+publish = false
+
+[dependencies]
+aristotle = { path = "../aristotle" }
+peano = { path = "../peano", features = ["fixed"] }
+clifford = { path = "../clifford" }
+newton = { path = "../newton" }
+joints = { path = "../joints" }
+bytemuck = { version = "1.25.0", features = ["derive"] }
+tokio = { version = "1.53.1", features = ["full"] }
+async-trait = "0.1.91"
+
+[dev-dependencies]
+melies = { path = "../melies" }
+futures = "0.3.33"
+
+
+[lints]
+workspace = true

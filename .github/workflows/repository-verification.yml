@@ -1,0 +1,189 @@
+# DORMANT. Like `quality-gates.yml`, this file does not trigger. Unlike it, the reason is not the
+# graphics device, and saying so precisely is the point of this header: a single blanket
+# "hosted CI cannot do anything here" would be false, and a false reason is worse than none.
+#
+# ---------------------------------------------------------------------------------------------
+# WHAT THIS COVERS, AND WHAT IT DELIBERATELY DOES NOT
+#
+# `docs/QUALITY_GATES.md` lists fifteen gates. This workflow would run only those that execute no
+# `cargo build` and therefore never reach `crates/newton/build.rs`:
+#
+#   gate 1   formatting                 cargo fmt --all -- --check
+#   gate 10  analyzer installation      tools/quality/install-external-tools.sh
+#   gate 8   workflow linting           actionlint; zizmor --pedantic
+#   gate 9   secret scanning            gitleaks git --redact
+#   gate 11  repository policy          tools/quality/repository_policy.py
+#   gate 12  commit signature/sign-off  tools/quality/check_commits.py
+#   gate 14  crate table consistency    tools/quality/check_crate_table.py
+#   gate 15  architecture index         tools/quality/check_docs.py index
+#
+# The other seven — lints, tests, documentation build, dependency policy, advisories, coverage
+# floors and the negative-fixture suite — are absent, and their absence is the honest part.
+# Gates 2, 3, 4, 7 and 13 compile the workspace. Gates 5 and 6 arguably do not, since `cargo deny`
+# and `cargo audit` read `Cargo.lock` and `cargo metadata` output rather than building; they are
+# still left out here because `docs/QUALITY_GATES.md` classifies every gate but gate 1 as needing
+# a device, and quietly reclassifying two of them in a workflow comment is not this file's
+# authority. If that classification is ever revised, gates 5 and 6 belong in this list.
+#
+# ---------------------------------------------------------------------------------------------
+# WHY IT IS DORMANT
+#
+# Two reasons, and neither is the Vulkan precondition:
+#
+#   1. A green run here would be a claim about eight gates that reads, on a pull request's checks
+#      list, like a claim about the project. The local gate runner is this project's authority
+#      precisely because it is the only thing that can evaluate all fifteen; a hosted check that
+#      is green while the seven compiling gates have never run is the shape of reassurance this
+#      milestone exists to avoid. If it is ever enabled, its `name` must say what it covers.
+#
+#   2. `docs/QUALITY_GATES.md` gate 11 and `tools/quality/repository_policy.py`
+#      (`FORBIDDEN_TRIGGERS`) forbid EVERY workflow in this repository from triggering on push,
+#      pull request or schedule while AR-0008's workflows are dormant. That is enforced as a
+#      repository-wide property, not per file, so enabling this one makes gate 11 fail until the
+#      rule is narrowed. The interlock is deliberate: a workflow cannot be woken up quietly.
+#
+# The Vulkan precondition is recorded in full in `quality-gates.yml`; in one line, the chain
+# `crates/newton/build.rs:1689` → `crates/newton/build.rs:544` →
+# `crates/aristotle/src/world.rs:469` → `crates/rembrandt/src/lib.rs:99` opens a Vulkan compute
+# device at build time through six `.expect()` calls with no fallback and no feature gate. It is
+# why the seven compiling gates are not in the list above.
+#
+# ---------------------------------------------------------------------------------------------
+# WHAT MUST CHANGE TO ENABLE IT
+#
+# In this file: the `"on":` block below, and nothing else. Outside it: gate 11's rule, per
+# reason 2 above. Nothing else in this file — no step, permission, runner label or action pin —
+# has to change, and that was demonstrated on a scratch branch.
+name: Repository verification (dormant)
+
+# DORMANT. `workflow_dispatch` only: no push, no pull request, no schedule, no `workflow_call`.
+# Checked on every gate run by `tools/quality/repository_policy.py`.
+"on":
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: repository-verification-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verification:
+    name: Device-free gates over the tracked tree
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # Pinned by full commit id, never by tag. `persist-credentials: false` keeps the job's
+      # token out of `.git/config`. fetch-depth 0 because gate 12 walks the introduced range and
+      # gate 9 scans this revision's history.
+      - name: Check out the revision under test
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Install the checkers' prerequisites
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends python3-yaml gnupg
+
+      # Gates 11 and 12 take a `--base`, and `docs/QUALITY_GATES.md` writes it as `origin/main`.
+      # That ref is not reliably present in an Actions checkout: `actions/checkout` fetches the
+      # refs it needs for the event, so on a branch build `refs/remotes/origin/main` may simply
+      # not exist and gate 12 would die on an unresolvable base before checking anything.
+      # Fetching it here is not an option worth taking either — `persist-credentials: false`
+      # above is a deliberate security property and re-authenticating a fetch to undo it would
+      # trade a real one for a convenience. So the base is resolved from what the event already
+      # provides, in descending order of precision, and the step fails closed rather than passing
+      # on a default that is not there. This step is why enabling this file needs no edit but
+      # the trigger block.
+      #
+      # UNTESTED, and said plainly: no run of this workflow has ever happened, so which candidate
+      # actually resolves on each event is reasoned from the checkout action's documented
+      # behaviour rather than observed. The failure mode is loud — a named error and a red run —
+      # not a silently empty range, which `check_commits.py` fails by design anyway.
+      - name: Resolve the base of the introduced range
+        id: range
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          resolves() {
+            test -n "${1:-}" && git rev-parse --verify --quiet "${1}^{commit}" >/dev/null
+          }
+          base=""
+          # The pull request's own base, then the pushed range's start, then main, then the first
+          # parent — which is the right answer for a merge commit and the runner's own advice for
+          # a post-merge run.
+          for candidate in "$PR_BASE" "$PUSH_BEFORE" origin/main HEAD^1; do
+            if resolves "$candidate"; then
+              base="$(git rev-parse "$candidate")"
+              echo "base ${base} resolved from ${candidate}"
+              break
+            fi
+          done
+          if test -z "$base"; then
+            echo "::error::no base commit is present in this checkout; refusing to gate an unknown range"
+            exit 1
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+
+      # Gate 1. The one gate `docs/QUALITY_GATES.md` names as device-free, and the only cargo
+      # invocation in this file. `cargo fmt` parses; it does not build, so nothing here reaches
+      # a build script.
+      - name: Gate 1 — formatting
+        run: cargo fmt --all -- --check
+
+      # Gate 10. Digest-verified before extraction; a mismatch aborts and is never a warning.
+      # Gates 8 and 9 must not run without it, which is why its output feeds them directly and
+      # `set -e` makes a failed install end the job.
+      - name: Gate 10 — install the external analyzers
+        id: analyzers
+        run: |
+          set -euo pipefail
+          bin_dir="$(tools/quality/install-external-tools.sh)"
+          echo "bin-dir=${bin_dir}" >> "$GITHUB_OUTPUT"
+
+      # Gate 8. actionlint for validity, zizmor at its strictest persona for security. Run
+      # against this file and its sibling: a dormant workflow that rots into an unsafe one before
+      # it is enabled is exactly what this gate exists to catch.
+      - name: Gate 8 — workflow linting
+        env:
+          BIN_DIR: ${{ steps.analyzers.outputs.bin-dir }}
+        run: |
+          set -euo pipefail
+          "$BIN_DIR/actionlint"
+          "$BIN_DIR/zizmor" --pedantic .
+
+      # Gate 9. History, redacted. Any finding fails.
+      - name: Gate 9 — secret scanning
+        env:
+          BIN_DIR: ${{ steps.analyzers.outputs.bin-dir }}
+        run: |
+          set -euo pipefail
+          "$BIN_DIR/gitleaks" git --redact --no-banner .
+
+      # Gates 11, 14 and 15. Offline, network-free, whole tracked tree.
+      - name: Gates 11, 14 and 15 — repository policy, crate table, architecture index
+        env:
+          RANGE_BASE: ${{ steps.range.outputs.base }}
+        run: |
+          set -euo pipefail
+          tools/quality/repository_policy.py --base "$RANGE_BASE" --head HEAD
+          tools/quality/check_crate_table.py
+          tools/quality/check_docs.py index
+
+      # Gate 12. Signature, sign-off and message privacy over the introduced range. It verifies
+      # against config/allowed-keys.asc in a throwaway GNUPGHOME rather than the ambient keyring,
+      # so a good signature by an unlisted key fails. An empty range fails too, by design.
+      - name: Gate 12 — commit signature, sign-off and message privacy
+        env:
+          RANGE_BASE: ${{ steps.range.outputs.base }}
+        run: tools/quality/check_commits.py --base "$RANGE_BASE" --head HEAD
