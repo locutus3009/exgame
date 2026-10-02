@@ -353,6 +353,30 @@ def product_checkout(settings: Meta) -> Path:
     return Path(top)
 
 
+def product_paths() -> tuple[str, ...]:
+    """Return a pathspec for everything in the repository except the coordination state."""
+    return (":(top)", f":(top,exclude){ROOT.name}")
+
+
+def product_head(repo: Path, ref: str) -> str:
+    """Return the newest commit on ``ref``'s first-parent line that changed the product.
+
+    State shares the repository, so every reconcile commit moves ``HEAD`` and ``origin/main``.
+    A view that recorded the raw tip would be stale the moment it was committed, and ``doctor
+    --live`` could never pass. Commits that touch only ``coordination/`` are skipped instead;
+    the first-parent line keeps a merge, rather than the branch commit beneath it, as the head.
+    A ref this checkout cannot resolve -- a remote tip not yet fetched -- is reported as given,
+    so the view stays stale until a fetch makes it comparable.
+    """
+    found = run(
+        ["git", "-C", str(repo), "rev-list", "-1", "--first-parent", ref, "--", *product_paths()],
+        check=False,
+    ).stdout.strip()
+    if found:
+        return found
+    return run(["git", "-C", str(repo), "rev-parse", ref], check=False).stdout.strip() or ref
+
+
 def project_scan() -> State:
     settings = config()
     repo = product_checkout(settings)
@@ -360,7 +384,7 @@ def project_scan() -> State:
     paths = [Path(line[9:]) for line in raw.splitlines() if line.startswith("worktree ")]
     worktrees = []
     for path in paths:
-        head = run(["git", "-C", str(path), "rev-parse", "HEAD"]).stdout.strip()
+        head = product_head(path, "HEAD")
         branch = (
             run(
                 ["git", "-C", str(path), "symbolic-ref", "--short", "-q", "HEAD"], check=False
@@ -369,7 +393,17 @@ def project_scan() -> State:
         )
         changed = run(["git", "-C", str(path), "status", "--porcelain=v1"]).stdout.splitlines()
         counts = run(
-            ["git", "-C", str(path), "rev-list", "--left-right", "--count", "origin/main...HEAD"],
+            [
+                "git",
+                "-C",
+                str(path),
+                "rev-list",
+                "--left-right",
+                "--count",
+                "origin/main...HEAD",
+                "--",
+                *product_paths(),
+            ],
             check=False,
         ).stdout.split()
         worktrees.append(
@@ -422,9 +456,9 @@ def project_scan() -> State:
     if not remote_line:
         raise RuntimeError("remote main is missing")
     return {
-        "remote_main": remote_line.split()[0],
-        "origin_main": run(["git", "-C", str(repo), "rev-parse", "origin/main"]).stdout.strip(),
-        "primary_head": run(["git", "-C", str(repo), "rev-parse", "HEAD"]).stdout.strip(),
+        "remote_main": product_head(repo, remote_line.split()[0]),
+        "origin_main": product_head(repo, "origin/main"),
+        "primary_head": product_head(repo, "HEAD"),
         "worktrees": worktrees,
         "prs": prs,
         "runs": runs,
@@ -435,7 +469,8 @@ def live_docs(state: State) -> tuple[str, str]:
     project = [
         "# Game Experiment live project state",
         "",
-        "Generated from local Git and GitHub. Do not edit.",
+        "Generated from local Git and GitHub. Do not edit. Heads are the newest commit that",
+        "changed anything outside `coordination/`, so state commits do not move them.",
         "",
         f"- Product remote main: `{state['remote_main']}`",
         f"- Local origin/main: `{state['origin_main']}`",
@@ -473,7 +508,8 @@ def live_docs(state: State) -> tuple[str, str]:
     worktrees = [
         "# Game Experiment worktree inventory",
         "",
-        "Generated from live Git. Paths are privacy-safe worktree keys.",
+        "Generated from live Git. Paths are privacy-safe worktree keys. Heads and counts skip",
+        "commits that touch only `coordination/`.",
         "",
         "| Worktree | Branch | Head | Dirty | vs origin/main |",
         "| --- | --- | --- | ---: | --- |",
