@@ -21,6 +21,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Sender};
 use std::thread::{self, JoinHandle};
+use tokio::sync::Semaphore;
 use vulkano::{
     command_buffer::{
         AutoCommandBufferBuilder, CommandBufferUsage, allocator::StandardCommandBufferAllocator,
@@ -209,6 +210,8 @@ struct Shaders {
     cmd_allocator: Arc<StandardCommandBufferAllocator>,
     gpu: Arc<GpuAccelerator>,
     world: Arc<World>,
+    #[cfg(test)]
+    fault: Option<Arc<FaultInjector>>,
 }
 
 impl Shaders {
@@ -261,6 +264,11 @@ impl Shaders {
         // region no matter how the scopes below are later rearranged.
         let mut retired: Vec<MessageInput> = Vec::new();
 
+        #[cfg(test)]
+        if let Some(f) = &self.fault {
+            f.trip(gpu_batches)?;
+        }
+
         {
             let command_buffer = builder.build().map_err(Self::backend)?;
 
@@ -288,6 +296,63 @@ impl Shaders {
 
         Ok(())
     }
+
+    /// Run one flush and report its outcome to every job it carried.
+    ///
+    /// On success `dispatch` has already notified each job through `check`. On
+    /// failure it returns before `check` with every batch still intact, so the
+    /// jobs are answered here: one submission is atomic, its error is the outcome
+    /// of every job in it, and the worker survives to serve the next batch. The
+    /// batches are left empty either way, which is what keeps the caller's
+    /// occupancy counters exact after a reset.
+    fn flush(&self, gpu_batches: &mut PendingByKind) {
+        let Err(e) = self.dispatch(gpu_batches) else {
+            return;
+        };
+        // Retired inputs die after the loop, with no world guard held — the same
+        // reason `dispatch` collects them instead of dropping them in place.
+        let mut retired: Vec<MessageInput> = Vec::new();
+        for batch in gpu_batches.values_mut() {
+            for (input, respond_to) in batch.drain(..) {
+                if let Some(respond_to) = respond_to {
+                    let _ = respond_to.send(Err(e.clone()));
+                }
+                retired.push(input);
+            }
+        }
+    }
+}
+
+/// Test seam: fail chosen flushes AFTER their command buffer is recorded and
+/// before it is submitted — the point where a real `build` or submit error
+/// leaves the batch fully set up but never run.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct FaultInjector {
+    /// Flushes still to fail, counted down one per injected failure.
+    fail: std::sync::atomic::AtomicUsize,
+    /// Messages each failed flush carried, in order.
+    failed_jobs: std::sync::Mutex<Vec<usize>>,
+}
+
+#[cfg(test)]
+impl FaultInjector {
+    fn trip(&self, gpu_batches: &PendingByKind) -> Result<(), EvalError> {
+        use std::sync::atomic::Ordering;
+        let armed = self
+            .fail
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok();
+        if !armed {
+            return Ok(());
+        }
+        let jobs = gpu_batches.values().map(Vec::len).sum();
+        self.failed_jobs.lock().unwrap().push(jobs);
+        Err(EvalError::Backend {
+            shader: "injected",
+            msg: "injected submission failure".into(),
+        })
+    }
 }
 
 // The `Accelerator` + async-dispatch design — the executor model (why the whole
@@ -297,27 +362,48 @@ impl Shaders {
 // lives in `/ACCELERATOR.md` (Parts II–IV). Kept out of source comments so the
 // design is not lost.
 //
-// The connection kernels run in the worker thread via a selected backend
-// (`backend-lua` default, `backend-cpu`; `wgsl` later) behind the SAME
-// `MessageInput::Eval` contract — only the worker body differs. The compiled
-// kernels live in the worker (mlua is `!Send`/`!Sync`), so the main-thread handle
-// holds only the channel + thread.
+// Every kernel runs on the GPU from a worker thread that owns the compiled
+// pipelines and the batch tables; the handle below holds only the channel, the
+// submission bound and the thread.
 pub struct Accelerator<T: Scalar + StandardPart + PartialOrd + Lift<T> + Pod> {
     tx: Sender<Message>,
     thread: Option<JoinHandle<()>>,
     /// Rows the batch table holds — every shader's `incidence`/`fatals` buffers
     /// were allocated at this size, so it bounds one message AND one flush.
     capacity: usize,
+    /// Back-pressure: one permit per submitted message, held until its outcome
+    /// arrives. A producer that finds none left WAITS (asynchronously) instead
+    /// of growing the queue without limit.
+    permits: Semaphore,
     /// The message path is fully type-erased — a payload is slot INDICES, and the
     /// scalar type only ever appears in this handle's own signatures.
     _marker: PhantomData<T>,
 }
 
-pub struct AcceleratorBuilder<T>(Arc<World>, PhantomData<T>);
+/// Configures an [`Accelerator`]. Every knob changes only TIMING — how messages
+/// pack into flushes and how far producers may run ahead — never the result of
+/// any kernel (ACCELERATOR.md Part V, the determinism invariant).
+pub struct AcceleratorBuilder<T> {
+    world: Arc<World>,
+    batch_size: Option<usize>,
+    max_pending: usize,
+    log_flushes: bool,
+    #[cfg(test)]
+    fault: Option<Arc<FaultInjector>>,
+    _marker: PhantomData<T>,
+}
 
 impl<T: Scalar + StandardPart + PartialOrd + Lift<T> + Pod> Accelerator<T> {
     pub fn builder(world: Arc<World>) -> AcceleratorBuilder<T> {
-        AcceleratorBuilder(world, PhantomData)
+        AcceleratorBuilder {
+            world,
+            batch_size: None,
+            max_pending: AcceleratorBuilder::<T>::DEFAULT_MAX_PENDING,
+            log_flushes: false,
+            #[cfg(test)]
+            fault: None,
+            _marker: PhantomData,
+        }
     }
 
     /// Dispatch one connected island's connection kernels — the accelerator-owned
@@ -634,12 +720,64 @@ impl<T: Scalar + StandardPart + PartialOrd + Lift<T> + Pod> Accelerator<T> {
     /// Send one job to the worker and await its result. A dead channel (worker
     /// gone) is a recoverable `EvalError::WorkerGone`, not a panic; the kernel's
     /// own failure comes back as the inner `Err(EvalError)`.
+    ///
+    /// Waits for a submission permit first (`AcceleratorBuilder::max_pending`)
+    /// and holds it until the outcome arrives. That cannot deadlock: a held
+    /// permit only waits on the worker, and the worker flushes whenever its
+    /// channel runs dry, which it does once every permit is taken.
     async fn submit(&self, input: MessageInput) -> Result<(), EvalError> {
+        // The semaphore is never closed, so `acquire` cannot fail; map it anyway
+        // rather than unwrap on the producer's side.
+        let _permit = self
+            .permits
+            .acquire()
+            .await
+            .map_err(|_| EvalError::WorkerGone)?;
         let (respond_to, rx) = oneshot::channel();
         self.tx
             .send(Message::Job { input, respond_to })
             .map_err(|_| EvalError::WorkerGone)?;
         rx.await.map_err(|_| EvalError::WorkerGone)?
+    }
+}
+
+impl<T> AcceleratorBuilder<T> {
+    /// Default for [`Self::max_pending`]. Far above what one step of the
+    /// largest test scene keeps in flight, so it only bites on a runaway
+    /// producer.
+    pub const DEFAULT_MAX_PENDING: usize = 1 << 16;
+
+    /// Flush threshold, in batch-table ROWS per kernel: a flush goes out as soon
+    /// as one kernel's queued rows reach it, or when the submission channel runs
+    /// dry, whichever comes first. Defaults to — and is capped at — the batch
+    /// table's capacity (`GpuAccelerator::gpu_in_flight`); `0` is taken as `1`.
+    ///
+    /// A hint, not a split: a message is one whole round and is never torn
+    /// across flushes, so a round wider than the hint simply flushes alone.
+    pub fn batch_size(mut self, rows: usize) -> Self {
+        self.batch_size = Some(rows.max(1));
+        self
+    }
+
+    /// Back-pressure bound: at most this many messages submitted and not yet
+    /// answered. A producer past it waits for an outcome to free a slot. `0`
+    /// is taken as `1`. Defaults to [`Self::DEFAULT_MAX_PENDING`].
+    pub fn max_pending(mut self, messages: usize) -> Self {
+        self.max_pending = messages.max(1);
+        self
+    }
+
+    /// Print one line per flush to stderr — batch count, rows, the fullest
+    /// kernel. Off by default.
+    pub fn log_flushes(mut self, on: bool) -> Self {
+        self.log_flushes = on;
+        self
+    }
+
+    #[cfg(test)]
+    fn inject_faults(mut self, fault: Arc<FaultInjector>) -> Self {
+        self.fault = Some(fault);
+        self
     }
 }
 
@@ -656,20 +794,26 @@ impl<T: Scalar + StandardPart + PartialOrd + Lift<T> + Pod + Sync + Send + 'stat
             "gpu backend: only f32, got {}",
             type_name::<T>()
         );
-        let w = &self.0;
+        let w = &self.world;
         let g = w.gpu();
         let capacity = g.gpu_in_flight();
+        let gpu_batch_size = self.batch_size.unwrap_or(capacity).min(capacity);
+        let log_flushes = self.log_flushes;
 
         let shaders = Shaders {
             shaders: shaders::all_shaders(w),
             cmd_allocator: g.cmd_allocator().clone(),
             gpu: g,
             world: w.clone(),
+            #[cfg(test)]
+            fault: self.fault,
         };
 
+        // Unbounded on purpose: the bound is the `permits` semaphore, which a
+        // producer awaits instead of blocking its executor thread on a full
+        // `sync_channel`.
         let (tx, rx) = mpsc::channel::<Message>();
         let thread = thread::spawn(move || {
-            let gpu_batch_size = shaders.gpu.gpu_in_flight();
             // Register every message kind's batch up front, so the push site is a
             // plain lookup. A message whose kind is missing here is a wiring bug (a
             // new `MessageKind` left unregistered) and panics rather than silently
@@ -719,13 +863,14 @@ impl<T: Scalar + StandardPart + PartialOrd + Lift<T> + Pod + Sync + Send + 'stat
                         // none (a variant left unwired).
                         let kind = input.kind;
                         let n = input.invocations();
-                        // A message that would overrun the table flushes what is
-                        // already queued FIRST, then joins the empty batch. The
-                        // producer never sends a message wider than the table
-                        // (`submit_rounds` chunks), so one always fits.
+                        // A message that would overrun the threshold flushes what
+                        // is already queued FIRST, then joins the empty batch. The
+                        // threshold never exceeds the table, and the producer never
+                        // sends a message wider than the table (`submit_rounds`
+                        // chunks), so one always fits.
                         let full = *rows_in.get(&kind).unwrap() + n > gpu_batch_size;
                         if full && pending > 0 {
-                            shaders.dispatch(&mut gpu_batches).unwrap();
+                            shaders.flush(&mut gpu_batches);
                             pending = 0;
                             max_len = 0;
                             rows_in.values_mut().for_each(|v| *v = 0);
@@ -745,15 +890,17 @@ impl<T: Scalar + StandardPart + PartialOrd + Lift<T> + Pod + Sync + Send + 'stat
                     }
                 };
 
-                let has_full = max_len == gpu_batch_size;
+                // `>=`, not `==`: under a batch-size hint smaller than a round,
+                // one message alone can overshoot the threshold.
+                let has_full = max_len >= gpu_batch_size;
                 if pending > 0 && (has_full || empty) {
-                    // Only counted when a flush actually happens — it is a log
-                    // field, not part of the decision.
-                    let non_zero = gpu_batches.values().filter(|v| !v.is_empty()).count();
-                    eprintln!(
-                        "[GPU] Total size of all {non_zero} batches: {pending:5} (max {max_len:5} in batch)"
-                    );
-                    shaders.dispatch(&mut gpu_batches).unwrap();
+                    if log_flushes {
+                        let non_zero = gpu_batches.values().filter(|v| !v.is_empty()).count();
+                        eprintln!(
+                            "[GPU] Total size of all {non_zero} batches: {pending:5} (max {max_len:5} in batch)"
+                        );
+                    }
+                    shaders.flush(&mut gpu_batches);
                     pending = 0;
                     max_len = 0;
                     rows_in.values_mut().for_each(|v| *v = 0);
@@ -765,6 +912,7 @@ impl<T: Scalar + StandardPart + PartialOrd + Lift<T> + Pod + Sync + Send + 'stat
             thread: Some(thread),
             tx,
             capacity,
+            permits: Semaphore::new(self.max_pending),
             _marker: PhantomData,
         }
     }
@@ -1431,6 +1579,92 @@ mod tests {
     fn gpu_path_rejects_non_f32_world() {
         let world = Arc::new(World::builder().usual::<f64>());
         let _accel = Accelerator::<f64>::builder(world).build();
+    }
+
+    /// A flush that fails must answer EVERY job it carried with
+    /// `EvalError::Backend`, leave their outputs unwritten, and leave the worker
+    /// serving: the batch after it, on the same accelerator, succeeds.
+    #[tokio::test]
+    async fn failed_flush_reports_backend_to_every_job_and_worker_survives() {
+        let world = Arc::new(World::builder().usual::<f32>());
+        const N: usize = 64;
+        let mut map = world.write::<f32>();
+        let sums: Vec<SumCase> = (0..N)
+            .map(|i| {
+                let i = i as f32 + 1.0;
+                (map.add(i), map.add(i), map.add(0.0), i + i)
+            })
+            .collect();
+        drop(map);
+
+        let fault = Arc::new(FaultInjector::default());
+        fault.fail.store(1, std::sync::atomic::Ordering::SeqCst);
+        let accel = Accelerator::<f32>::builder(world.clone())
+            .inject_faults(fault.clone())
+            .build();
+
+        // All N go out together, so the failed flush carries more than one job.
+        let results = join_all(sums.iter().map(|s| accel.simple_sum(&s.0, &s.1, &s.2))).await;
+
+        let failed = fault.failed_jobs.lock().unwrap().clone();
+        assert_eq!(failed.len(), 1, "exactly one flush was set to fail");
+        let errs: Vec<_> = results.iter().filter(|r| r.is_err()).collect();
+        assert_eq!(
+            errs.len(),
+            failed[0],
+            "every job of the failed flush, and only those, must see the error"
+        );
+        assert!(failed[0] >= 1);
+        for e in errs {
+            match e {
+                Err(EvalError::Backend { shader, .. }) => assert_eq!(*shader, "injected"),
+                other => panic!("expected EvalError::Backend, got {other:?}"),
+            }
+        }
+        for (s, r) in sums.iter().zip(&results) {
+            match r {
+                Ok(()) => assert_eq!(s.2.read(), s.3),
+                // Failed before submission: the kernel never ran.
+                Err(_) => assert_eq!(s.2.read(), 0.0),
+            }
+        }
+
+        // The same accelerator serves the next batch.
+        let again: Vec<_> = join_all(sums.iter().map(|s| accel.simple_sum(&s.0, &s.1, &s.2))).await;
+        for (s, r) in sums.iter().zip(again) {
+            r.expect("the batch after a failed one must succeed");
+            assert_eq!(s.2.read(), s.3);
+        }
+        assert_eq!(fault.failed_jobs.lock().unwrap().len(), 1);
+    }
+
+    /// Several failed flushes in a row, with a batch-size hint of one row so each
+    /// carries exactly one job: each job gets its own error, then the worker
+    /// recovers.
+    #[tokio::test]
+    async fn consecutive_failed_flushes_each_report_their_own_job() {
+        let world = Arc::new(World::builder().usual::<f32>());
+        let mut map = world.write::<f32>();
+        let s: SumCase = (map.add(2.0), map.add(3.0), map.add(0.0), 5.0);
+        drop(map);
+
+        let fault = Arc::new(FaultInjector::default());
+        fault.fail.store(3, std::sync::atomic::Ordering::SeqCst);
+        let accel = Accelerator::<f32>::builder(world.clone())
+            .batch_size(1)
+            .inject_faults(fault.clone())
+            .build();
+
+        for _ in 0..3 {
+            assert!(matches!(
+                accel.simple_sum(&s.0, &s.1, &s.2).await,
+                Err(EvalError::Backend { .. })
+            ));
+        }
+        assert_eq!(*fault.failed_jobs.lock().unwrap(), vec![1, 1, 1]);
+        assert_eq!(s.2.read(), 0.0);
+        accel.simple_sum(&s.0, &s.1, &s.2).await.unwrap();
+        assert_eq!(s.2.read(), s.3);
     }
 
     #[tokio::test]
