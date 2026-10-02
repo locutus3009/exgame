@@ -5,13 +5,13 @@
 
 ## Portfolio overview
 
-**8 ARs tracked** across 4 active status categories.
+**8 ARs tracked** across 3 active status categories.
 
 | Status | Meaning | Count |
 | --- | --- | ---: |
-| **In progress** | Claimed work with a live lease | 2 |
+| **In progress** | Claimed work with a live lease | 3 |
 | **In review** | Submitted by its worker, awaiting a coordinator decision | 0 |
-| **Open** | Dependency-ready and available to claim | 1 |
+| **Open** | Dependency-ready and available to claim | 0 |
 | **Blocked** | Cannot proceed until its recorded blocker clears | 0 |
 | **Planned** | Defined work awaiting promotion or dependencies | 2 |
 | **Future** | Deferred roadmap work | 0 |
@@ -32,7 +32,7 @@ flowchart LR
         AR_0101["AR-0101 - Done"]:::status_done
         AR_0102["AR-0102 - Done"]:::status_done
         AR_0103["AR-0103 - Planned"]:::status_planned
-        AR_0104["AR-0104 - Open"]:::status_open
+        AR_0104["AR-0104 - In progress"]:::status_in_progress
         AR_0105["AR-0105 - In progress"]:::status_in_progress
         AR_0106["AR-0106 - Done"]:::status_done
         AR_0107["AR-0107 - In progress"]:::status_in_progress
@@ -75,18 +75,13 @@ flowchart LR
 
 ## Complete AR inventory
 
-### In progress (2)
+### In progress (3)
 
 | Priority | AR | Owner | Summary | Next action |
 | --- | --- | --- | --- | --- |
+| P0 | [AR-0104](tasks/AR-0104.md): Accelerator worker: failure path, bounded submission, flush policy | worker-ar0104 | A Vulkan error panics the worker (dispatch(..).unwrap()), so callers only see WorkerGone; the channel is unbounded; every flush prints to stderr; batch composition is never varied in tests. | Claim; write the failing test for a forced submission error first. |
 | P1 | [AR-0105](tasks/AR-0105.md): Fix the two FIXME: deadlock? reproducers in the implicit solver | worker-ar0105 | dimension_change_reallocates_and_clears_the_hint and topology_change_causes_no_visible_jolt are #&#91;ignore&#93;d with &#x27;FIXME: deadlock?&#x27;. Suspected: a WorldKey dropped while world.write::&lt;T&gt;() is held. | Claim; run both ignored tests with a timeout to confirm the hang, then confirm or refute the suspected cause before changing code. |
 | P3 | [AR-0107](tasks/AR-0107.md): Precision seam: measure f32 base poses far from the origin | worker-ar0107 | The shaders bind Motor&lt;f32&gt; base poses directly; ACCELERATOR.md Part V calls the precision of that narrowing unexamined. Islands re-anchor at their centre of mass; measure whether that suffices. | Claim; write a test that steps the same mechanism at the origin and translated far away and compares relative motion. |
-
-### Open (1)
-
-| Priority | AR | Owner | Summary | Next action |
-| --- | --- | --- | --- | --- |
-| P0 | [AR-0104](tasks/AR-0104.md): Accelerator worker: failure path, bounded submission, flush policy | Unclaimed | A Vulkan error panics the worker (dispatch(..).unwrap()), so callers only see WorkerGone; the channel is unbounded; every flush prints to stderr; batch composition is never varied in tests. | Claim; write the failing test for a forced submission error first. |
 
 ### Planned (2)
 
