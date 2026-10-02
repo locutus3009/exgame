@@ -5,13 +5,13 @@
 
 ## Portfolio overview
 
-**8 ARs tracked** across 3 active status categories.
+**8 ARs tracked** across 2 active status categories.
 
 | Status | Meaning | Count |
 | --- | --- | ---: |
-| **In progress** | Claimed work with a live lease | 1 |
+| **In progress** | Claimed work with a live lease | 2 |
 | **In review** | Submitted by its worker, awaiting a coordinator decision | 0 |
-| **Open** | Dependency-ready and available to claim | 1 |
+| **Open** | Dependency-ready and available to claim | 0 |
 | **Blocked** | Cannot proceed until its recorded blocker clears | 0 |
 | **Planned** | Defined work awaiting promotion or dependencies | 6 |
 | **Future** | Deferred roadmap work | 0 |
@@ -33,7 +33,7 @@ flowchart LR
         AR_0102["AR-0102 - Planned"]:::status_planned
         AR_0103["AR-0103 - Planned"]:::status_planned
         AR_0104["AR-0104 - In progress"]:::status_in_progress
-        AR_0105["AR-0105 - Open"]:::status_open
+        AR_0105["AR-0105 - In progress"]:::status_in_progress
         AR_0106["AR-0106 - Planned"]:::status_planned
         AR_0107["AR-0107 - Planned"]:::status_planned
         AR_0108["AR-0108 - Planned"]:::status_planned
@@ -75,17 +75,12 @@ flowchart LR
 
 ## Complete AR inventory
 
-### In progress (1)
+### In progress (2)
 
 | Priority | AR | Owner | Summary | Next action |
 | --- | --- | --- | --- | --- |
 | P0 | [AR-0104](tasks/AR-0104.md): Accelerator worker: failure path, bounded submission, flush policy | worker-ar0104 | A Vulkan error panics the worker (dispatch(..).unwrap()), so callers only see WorkerGone; the channel is unbounded; every flush prints to stderr; batch composition is never varied in tests. | Claim; write the failing test for a forced submission error first. |
-
-### Open (1)
-
-| Priority | AR | Owner | Summary | Next action |
-| --- | --- | --- | --- | --- |
-| P1 | [AR-0105](tasks/AR-0105.md): Fix the two FIXME: deadlock? reproducers in the implicit solver | Unclaimed | dimension_change_reallocates_and_clears_the_hint and topology_change_causes_no_visible_jolt are #&#91;ignore&#93;d with &#x27;FIXME: deadlock?&#x27;. Suspected: a WorldKey dropped while world.write::&lt;T&gt;() is held. | Claim; run both ignored tests with a timeout to confirm the hang, then confirm or refute the suspected cause before changing code. |
+| P1 | [AR-0105](tasks/AR-0105.md): Fix the two FIXME: deadlock? reproducers in the implicit solver | worker-ar0105 | dimension_change_reallocates_and_clears_the_hint and topology_change_causes_no_visible_jolt are #&#91;ignore&#93;d with &#x27;FIXME: deadlock?&#x27;. Suspected: a WorldKey dropped while world.write::&lt;T&gt;() is held. | Claim; run both ignored tests with a timeout to confirm the hang, then confirm or refute the suspected cause before changing code. |
 
 ### Planned (6)
 
