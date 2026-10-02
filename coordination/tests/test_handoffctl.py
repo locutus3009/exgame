@@ -3638,6 +3638,12 @@ class RealRepositoryTest(unittest.TestCase):
         self.commit("coordination/CURRENT.md", "generated\n")
         self.assertEqual(product, CORE.product_head(self.repo, "HEAD"))
         self.assertEqual(product, CORE.product_head(self.repo / "coordination", "HEAD"))
+        # The coordinator's own code is product work, not state, and does move the head.
+        tooling = self.commit("coordination/tools/handoffctl.py", "# changed\n")
+        self.assertEqual(tooling, CORE.product_head(self.repo, "HEAD"))
+        for name in ("tasks/AR-0101.md", "plans/AR-0101.md", "milestones/M1.md", "WORKTREES.md"):
+            self.commit(f"coordination/{name}", "state\n")
+        self.assertEqual(tooling, CORE.product_head(self.repo, "HEAD"))
 
     def test_product_head_keeps_a_merge_on_the_first_parent_line(self) -> None:
         git = ["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid"]
