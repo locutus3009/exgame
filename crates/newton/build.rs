@@ -22,7 +22,9 @@
 //!     parameterised by that `InSpec` and by the kernel's outputs (`OutBuf`).
 //!   - `input_map` / `field` / `wrench_slots` / `motor_slots` — the input-side
 //!     Pod recombination, derived from the same `InSpec`.
-//!   - `fatal_map` / `write_glsl` — fatal-slot wiring and file output.
+//!   - `fatal_slots` / `fatal_map` / `write_kernel` / `write_fatal_counts` —
+//!     fatal-slot sizing and wiring, file output, and the per-kernel fatal-count
+//!     table the host scans by.
 //!
 //! Only the traced kernel, the output layout (`*_output_map`) and the `InSpec` +
 //! `OutBuf` lists differ. New emitters for other functions reuse the same
@@ -62,9 +64,6 @@ const NOUT_PLAIN: usize = 12;
 // (8 motor components) + the solve velocity (6 twist coords) = 14 out.
 const NIN_PRE: usize = 15;
 const NOUT_PRE: usize = 14;
-// Number of fatal (div-by-zero) slots per invocation.
-// FIXME: should be `traced.fatal_leaves().len()`, which does not work yet.
-const FATALS: usize = 20;
 
 /// Reverse-engineer where each constructor coordinate lands in a type's RAW Pod
 /// layout — the layout the GPU shader's `cN` fields overlay. `raw` is the Pod cast
@@ -214,7 +213,31 @@ fn input_map(spec: &InSpec) -> HashMap<u32, String> {
         .collect()
 }
 
-/// Fatal slot `i` → its GLSL lvalue.
+// ── Fatal slots ──────────────────────────────────────────────────────────────
+// A guarded division the tracer cannot prove safe leaves a fatal-STATUS operand
+// (1.0 when the guard trips, else 0.0) in the flattened kernel's `Return`. Each
+// operand gets one slot of the invocation's `Fatals.fatal[]`, the host scans
+// the slots after the dispatch, and a non-zero slot fails the message that owns
+// the invocation (`accelerator/shaders.rs`, `check`). Nothing here is
+// hand-counted: the slot count is read off the trace, the array is sized from
+// it, and the same count is published to the host through `fatal_counts.rs`.
+
+/// Fatal slots the traced kernel writes per invocation.
+fn fatal_slots(traced: &viete::Trace) -> usize {
+    viete::glsl::fatal_slots(traced.tree())
+}
+
+/// Declared length of `Fatals.fatal[]` for a kernel writing `fatals` slots. At
+/// least 1: GLSL has no zero-length arrays, and the row-driven kernels clear
+/// `fatal[0]` unconditionally (`row_head`). A slot past the count is never
+/// written by the trace and never scanned by the host.
+fn fatal_width(fatals: usize) -> usize {
+    fatals.max(1)
+}
+
+/// Fatal slot `i` → its GLSL lvalue, for exactly the `fatals` slots the trace
+/// writes. `emit_glsl` refuses to emit a fatal operand this map does not cover,
+/// so a kernel with more fatal operands than slots fails the build.
 fn fatal_map(fatals: usize) -> HashMap<u32, String> {
     (0..fatals as u32)
         .map(|i| (i, format!("fatals.data[idx].fatal[{i}]")))
@@ -276,7 +299,7 @@ impl OutBuf {
 /// Assemble the shared GLSL preamble: fixed input structs/bindings (twist, motor,
 /// params, fatals, incidence) laid out per `spec`, plus the caller's own output
 /// buffers. Every generated kernel shares this; only `spec`, `outs` and the
-/// traced body differ.
+/// traced body differ. `fatals` is the trace's fatal-slot count (`fatal_slots`).
 fn preamble(_spec: &InSpec, fatals: usize, outs: &[OutBuf]) -> String {
     let mut s = String::new();
     s.push_str(
@@ -310,7 +333,7 @@ struct Motor {
     s.push_str(&format!(
         "struct Row {{\n    uint c[{ROW}];\n}};\n\nstruct Incidence {{\n    uint row;\n}};\n\nstruct Fatals {{\n"
     ));
-    s.push_str(&format!("    float fatal[{fatals}];\n"));
+    s.push_str(&format!("    float fatal[{}];\n", fatal_width(fatals)));
     s.push_str(
         r"};
 
@@ -457,6 +480,7 @@ const ROW: usize = 128;
 /// The preamble every ROW-driven kernel shares. Binding 1 is the batch table,
 /// now just a row index; binding 2 is the row storage; `bufs` are the stage's
 /// own storages from binding 3 upward, as `(glsl_struct, floats, block, var)`.
+/// `fatals` is the trace's fatal-slot count (`fatal_slots`).
 fn row_preamble(fatals: usize, bufs: &[(&str, usize, &str, &str)]) -> String {
     let mut s = String::new();
     let mut seen: Vec<&str> = Vec::new();
@@ -472,7 +496,8 @@ fn row_preamble(fatals: usize, bufs: &[(&str, usize, &str, &str)]) -> String {
         ));
     }
     s.push_str(&format!(
-        "struct Row {{\n    uint c[{ROW}];\n}};\n\nstruct Incidence {{\n    uint row;\n}};\n\nstruct Fatals {{\n    float fatal[{fatals}];\n}};\n\n"
+        "struct Row {{\n    uint c[{ROW}];\n}};\n\nstruct Incidence {{\n    uint row;\n}};\n\nstruct Fatals {{\n    float fatal[{width}];\n}};\n\n",
+        width = fatal_width(fatals)
     ));
     s.push_str(
         r"layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
@@ -530,11 +555,52 @@ fn acc_out(slot: usize) -> String {
     format!("acc.c[{slot}]")
 }
 
-/// Write a generated shader into `OUT_DIR`.
-fn write_glsl(file_name: &str, glsl: String) {
+/// One generated kernel: its file stem in `OUT_DIR` and the fatal slots it
+/// writes. `main` collects these into the host's fatal-count table.
+struct Kernel {
+    stem: String,
+    fatals: usize,
+}
+
+/// Write a generated shader into `OUT_DIR` as `{stem}.glsl`.
+fn write_kernel(stem: String, glsl: String, fatals: usize) -> Kernel {
     let out_dir = env::var("OUT_DIR").unwrap();
-    let dest_path = PathBuf::from(out_dir).join(file_name);
+    let dest_path = PathBuf::from(out_dir).join(format!("{stem}.glsl"));
     fs::write(&dest_path, glsl).unwrap();
+    Kernel { stem, fatals }
+}
+
+/// `SimpleSpringDamper_plain` → `SIMPLE_SPRING_DAMPER_PLAIN`.
+fn const_name(stem: &str) -> String {
+    let mut out = String::new();
+    let mut prev_lower = false;
+    for ch in stem.chars() {
+        if ch.is_ascii_uppercase() && prev_lower {
+            out.push('_');
+        }
+        prev_lower = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+        out.push(ch.to_ascii_uppercase());
+    }
+    out
+}
+
+/// Write `fatal_counts.rs` into `OUT_DIR`: one `usize` per generated kernel,
+/// the number of fatal slots its host-side check scans. `accelerator/shaders.rs`
+/// includes it, so the count the host reads is the count the trace produced.
+fn write_fatal_counts(kernels: &[Kernel]) {
+    let mut s = String::from(
+        "// This file has been automatically generated by newton/build.rs. Do not edit!\n\n",
+    );
+    for k in kernels {
+        s.push_str(&format!(
+            "/// Fatal slots `{stem}.glsl` writes per invocation.\npub(super) const {name}: usize = {n};\n",
+            stem = k.stem,
+            name = const_name(&k.stem),
+            n = k.fatals,
+        ));
+    }
+    let out_dir = env::var("OUT_DIR").unwrap();
+    fs::write(PathBuf::from(out_dir).join("fatal_counts.rs"), s).unwrap();
 }
 
 /// The world the traced joint lives in: `JointEdge::new` allocates its
@@ -767,7 +833,7 @@ fn plain_output_map() -> HashMap<u32, (String, i8)> {
         .collect()
 }
 
-fn generate_jacobian(v: &dyn JointFromParams<Sym>) {
+fn generate_jacobian(v: &dyn JointFromParams<Sym>) -> Kernel {
     let joint = build_joint_sym(build_world(), v);
     // The 24 partials of each component are the lane-parallel AD-gradient axis;
     // declare them so the vectorizer groups them (zero-folding hides this from
@@ -814,15 +880,16 @@ fn generate_jacobian(v: &dyn JointFromParams<Sym>) {
     ];
 
     let spec = InSpec::joint(v.n_params());
+    let fatals = fatal_slots(&traced);
     let glsl = traced.emit_glsl(
-        preamble(&spec, FATALS, &outs),
+        preamble(&spec, fatals, &outs),
         body_pre(&spec, &outs),
         String::new(),
         &input_map(&spec),
         &jacobian_output_map(),
-        &fatal_map(FATALS),
+        &fatal_map(fatals),
     );
-    write_glsl(&format!("{}_jacobian.glsl", v.shader_name()), glsl);
+    write_kernel(format!("{}_jacobian", v.shader_name()), glsl, fatals)
 }
 
 /// Value-only sibling of `generate_jacobian`: traces `plain_kernel` (the two
@@ -830,7 +897,7 @@ fn generate_jacobian(v: &dyn JointFromParams<Sym>) {
 /// `{name}_plain.glsl`. This is the GPU kernel for connection dispatches that ask
 /// for the value only (explicit families / the Newton residual value pass) — no
 /// 24-wide AD gradient, so no `vectorize_lanes` (the output is 12 flat scalars).
-fn generate_plain(v: &dyn JointFromParams<Sym>) {
+fn generate_plain(v: &dyn JointFromParams<Sym>) -> Kernel {
     let joint = build_joint_sym(build_world(), v);
     let traced = Tracer::builder()
         .fn_name(v.shader_name())
@@ -855,15 +922,16 @@ fn generate_plain(v: &dyn JointFromParams<Sym>) {
     }];
 
     let spec = InSpec::joint(v.n_params());
+    let fatals = fatal_slots(&traced);
     let glsl = traced.emit_glsl(
-        preamble(&spec, FATALS, &outs),
+        preamble(&spec, fatals, &outs),
         body_pre(&spec, &outs),
         String::new(),
         &input_map(&spec),
         &plain_output_map(),
-        &fatal_map(FATALS),
+        &fatal_map(fatals),
     );
-    write_glsl(&format!("{}_plain.glsl", v.shader_name()), glsl);
+    write_kernel(format!("{}_plain", v.shader_name()), glsl, fatals)
 }
 
 /// PRE kernel — per BODY, not per connection, and with no AD: form the midpoint
@@ -930,7 +998,7 @@ fn pre_output_map() -> HashMap<u32, (String, i8)> {
 /// explicit families, so nothing can be promised about it. Both arms of `exp`'s
 /// small-angle branch therefore stay live — as they must, since a body at rest
 /// has a vanishing twist too.
-fn generate_pre() {
+fn generate_pre() -> Kernel {
     let traced = Tracer::builder()
         .fn_name("Pre")
         .flatten()
@@ -952,15 +1020,16 @@ fn generate_pre() {
         },
     ];
 
+    let fatals = fatal_slots(&traced);
     let glsl = traced.emit_glsl(
-        preamble(&spec, FATALS, &outs),
+        preamble(&spec, fatals, &outs),
         body_pre(&spec, &outs),
         String::new(),
         &input_map(&spec),
         &pre_output_map(),
-        &fatal_map(FATALS),
+        &fatal_map(fatals),
     );
-    write_glsl("Pre.glsl", glsl);
+    write_kernel("Pre".to_string(), glsl, fatals)
 }
 
 /// GATHER — per body: `total = external + Σ` incident connection wrenches.
@@ -973,7 +1042,7 @@ fn generate_pre() {
 ///
 /// `external` and `out` are the SAME storage, so it is bound once and both are
 /// read through it — binding it twice would alias it.
-fn generate_gather() {
+fn generate_gather() -> Kernel {
     let traced = Tracer::builder()
         .fn_name("Gather")
         .flatten()
@@ -1034,15 +1103,16 @@ fn generate_gather() {
         ("Wrench1", 6usize, "WrenchData", "total"),
         ("Wrench2", 12usize, "PairData", "pairs"),
     ];
+    let fatals = fatal_slots(&traced);
     let glsl = traced.emit_glsl(
-        row_preamble(1, &bufs),
+        row_preamble(fatals, &bufs),
         pre,
         footer,
         &inputs,
         &outputs,
-        &HashMap::new(),
+        &fatal_map(fatals),
     );
-    write_glsl("Gather.glsl", glsl);
+    write_kernel("Gather".to_string(), glsl, fatals)
 }
 
 /// BLOCK MATVEC — per body row: `dv_i = Σ_j x[i*m + j] · rhs[j]`.
@@ -1050,7 +1120,7 @@ fn generate_gather() {
 /// Row layout (authoritative copy in `accelerator::rows::matvec`):
 ///   0 out (Twist slot) | 1 accumulate | 2 n_terms
 ///   3.. pairs (x_block, rhs_wrench)
-fn generate_block_matvec() {
+fn generate_block_matvec() -> Kernel {
     let traced = Tracer::builder()
         .fn_name("BlockMatVec")
         .flatten()
@@ -1111,15 +1181,16 @@ fn generate_block_matvec() {
         ("Wrench1", 6usize, "RhsData", "rhs"),
         ("Twist1", 6usize, "DvData", "dv"),
     ];
+    let fatals = fatal_slots(&traced);
     let glsl = traced.emit_glsl(
-        row_preamble(1, &bufs),
+        row_preamble(fatals, &bufs),
         pre,
         footer,
         &inputs,
         &outputs,
-        &HashMap::new(),
+        &fatal_map(fatals),
     );
-    write_glsl("BlockMatVec.glsl", glsl);
+    write_kernel("BlockMatVec".to_string(), glsl, fatals)
 }
 
 /// GEMM — per output block: `out = Σ_k a[i*m + k] · (sign · b[k*m + j] + diag·2I)`.
@@ -1127,7 +1198,7 @@ fn generate_block_matvec() {
 /// Row layout (authoritative copy in `accelerator::rows::gemm`):
 ///   0 out_block | 1 accumulate | 2 n_terms | 3 sign (f32 bits)
 ///   4.. pairs (a_block, b_block * 2 + diag)
-fn generate_gemm() {
+fn generate_gemm() -> Kernel {
     let traced = Tracer::builder()
         .fn_name("Gemm")
         .flatten()
@@ -1173,15 +1244,16 @@ fn generate_gemm() {
     .to_string();
 
     let bufs = [("Block", 36usize, "BlockData", "blocks")];
+    let fatals = fatal_slots(&traced);
     let glsl = traced.emit_glsl(
-        row_preamble(1, &bufs),
+        row_preamble(fatals, &bufs),
         pre,
         footer,
         &inputs,
         &outputs,
-        &HashMap::new(),
+        &fatal_map(fatals),
     );
-    write_glsl("Gemm.glsl", glsl);
+    write_kernel("Gemm".to_string(), glsl, fatals)
 }
 
 /// ASSEMBLE — per output block: sum the connection Jacobians landing in `(i, j)`
@@ -1197,7 +1269,7 @@ fn generate_gemm() {
 /// column `col` is axis `ce*6 + col` and the velocity column is axis
 /// `12 + ce*6 + col`, so the host packs `base = bi*144 + ce*36` and the kernel
 /// reads `base + col*6 + slot` / `base + 72 + col*6 + slot`.
-fn generate_assemble() {
+fn generate_assemble() -> Kernel {
     let traced = Tracer::builder()
         .fn_name("AssembleBlock")
         .flatten()
@@ -1280,15 +1352,16 @@ fn generate_assemble() {
         ("Block", 36usize, "BlockData", "blocks"),
         ("WrenchJac", 288usize, "JacData", "jac"),
     ];
+    let fatals = fatal_slots(&traced);
     let glsl = traced.emit_glsl(
-        row_preamble(1, &bufs),
+        row_preamble(fatals, &bufs),
         pre,
         footer,
         &inputs,
         &outputs,
-        &HashMap::new(),
+        &fatal_map(fatals),
     );
-    write_glsl("AssembleBlock.glsl", glsl);
+    write_kernel("AssembleBlock".to_string(), glsl, fatals)
 }
 
 /// PER-BODY POST. `diagonal` picks which angular-inertia storage is bound and how
@@ -1321,7 +1394,7 @@ fn generate_assemble() {
 ///   0 hstep | 1 floor2 | 2 midpoint | 3 solve_vel | 4 mass | 5 angular
 ///   6 snap_mom | 7 external | 8 mass_out | 9 rhs_out | 10 scale_out | 11 n_terms
 ///   12.. `pair_slot * 2 + end`
-fn generate_body_post_gathered(diagonal: bool) {
+fn generate_body_post_gathered(diagonal: bool) -> Kernel {
     let name = if diagonal {
         "BodyPostGatheredDiagonal"
     } else {
@@ -1432,18 +1505,19 @@ fn generate_body_post_gathered(diagonal: bool) {
         ("Scalar1", 1usize, "PlainData", "plain"),
         ("Wrench2", 12usize, "PairData", "pairs"),
     ];
+    let fatals = fatal_slots(&traced);
     let glsl = traced.emit_glsl(
-        row_preamble(FATALS, &bufs),
+        row_preamble(fatals, &bufs),
         pre,
         String::new(),
         &inputs,
         &outputs,
-        &fatal_map(FATALS),
+        &fatal_map(fatals),
     );
-    write_glsl(&format!("{name}.glsl"), glsl);
+    write_kernel(name.to_string(), glsl, fatals)
 }
 
-fn generate_body_post(diagonal: bool) {
+fn generate_body_post(diagonal: bool) -> Kernel {
     let name = if diagonal {
         "BodyPostDiagonal"
     } else {
@@ -1550,17 +1624,19 @@ fn generate_body_post(diagonal: bool) {
         ("Ang", ang_floats, "AngData", "ang"),
         ("Scalar1", 1usize, "PlainData", "plain"),
     ];
-    // `Motor::inverse` divides, so this trace HAS fatal leaves — unlike the four
-    // reductions, which are pure arithmetic.
+    // `Motor::inverse` divides, yet this trace currently leaves NO fatal operand
+    // (its count in `fatal_counts.rs` is 0). The count is read off the trace, so
+    // neither case needs special handling here.
+    let fatals = fatal_slots(&traced);
     let glsl = traced.emit_glsl(
-        row_preamble(FATALS, &bufs),
+        row_preamble(fatals, &bufs),
         pre,
         footer,
         &inputs,
         &outputs,
-        &fatal_map(FATALS),
+        &fatal_map(fatals),
     );
-    write_glsl(&format!("{name}.glsl"), glsl);
+    write_kernel(name.to_string(), glsl, fatals)
 }
 
 /// Take a list of joint types (unit structs) and expand each into the
@@ -1587,7 +1663,7 @@ macro_rules! joints {
 ///
 /// Row layout (authoritative copy in `accelerator::rows::reduce`):
 ///   0 out (T slot) | 1 n_terms | 2.. `block * 2 + diag`
-fn generate_block_reduce() {
+fn generate_block_reduce() -> Kernel {
     let traced = Tracer::builder()
         .fn_name("BlockReduce")
         .flatten()
@@ -1628,15 +1704,16 @@ fn generate_block_reduce() {
         ("Block", 36usize, "BlockData", "blocks"),
         ("Scalar", 1usize, "ScalarData", "partials"),
     ];
+    let fatals = fatal_slots(&traced);
     let glsl = traced.emit_glsl(
-        row_preamble(1, &bufs),
+        row_preamble(fatals, &bufs),
         pre,
         footer,
         &inputs,
         &outputs,
-        &HashMap::new(),
+        &fatal_map(fatals),
     );
-    write_glsl("BlockReduce.glsl", glsl);
+    write_kernel("BlockReduce".to_string(), glsl, fatals)
 }
 
 /// BLOCK COPY — `dst = src`, one row per block.
@@ -1650,7 +1727,7 @@ fn generate_block_reduce() {
 ///
 /// Row layout (authoritative copy in `accelerator::rows::copy`):
 ///   0 dst (Block slot) | 1 src (Block slot)
-fn generate_block_copy() {
+fn generate_block_copy() -> Kernel {
     let traced = Tracer::builder()
         .fn_name("BlockCopy")
         .flatten()
@@ -1675,15 +1752,16 @@ fn generate_block_copy() {
     uint idx_src = rows.data[r].c[1];
 ";
     let bufs = [("Block", 36usize, "BlockData", "blocks")];
+    let fatals = fatal_slots(&traced);
     let glsl = traced.emit_glsl(
-        row_preamble(1, &bufs),
+        row_preamble(fatals, &bufs),
         pre,
         String::new(),
         &inputs,
         &outputs,
-        &HashMap::new(),
+        &fatal_map(fatals),
     );
-    write_glsl("BlockCopy.glsl", glsl);
+    write_kernel("BlockCopy".to_string(), glsl, fatals)
 }
 
 fn main() {
@@ -1695,20 +1773,23 @@ fn main() {
     ];
     // Two kernels per joint type: the full value+Jacobian block and the value-only
     // plain kernel (connection dispatch without a Jacobian).
-    joints.iter().for_each(|c| generate_jacobian(c.as_ref()));
-    joints.iter().for_each(|c| generate_plain(c.as_ref()));
+    let mut kernels: Vec<Kernel> = Vec::new();
+    kernels.extend(joints.iter().map(|c| generate_jacobian(c.as_ref())));
+    kernels.extend(joints.iter().map(|c| generate_plain(c.as_ref())));
 
-    generate_pre();
-    generate_gather();
-    generate_block_matvec();
-    generate_gemm();
-    generate_assemble();
-    generate_block_reduce();
-    generate_block_copy();
-    generate_body_post(true);
-    generate_body_post(false);
-    generate_body_post_gathered(true);
-    generate_body_post_gathered(false);
+    kernels.push(generate_pre());
+    kernels.push(generate_gather());
+    kernels.push(generate_block_matvec());
+    kernels.push(generate_gemm());
+    kernels.push(generate_assemble());
+    kernels.push(generate_block_reduce());
+    kernels.push(generate_block_copy());
+    kernels.push(generate_body_post(true));
+    kernels.push(generate_body_post(false));
+    kernels.push(generate_body_post_gathered(true));
+    kernels.push(generate_body_post_gathered(false));
+
+    write_fatal_counts(&kernels);
 
     println!("cargo:rerun-if-changed=build.rs");
 }
