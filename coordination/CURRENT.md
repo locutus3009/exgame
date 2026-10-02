@@ -3,11 +3,11 @@
 This file is generated. Read `README.md`, then use `tools/handoffctl snapshot`.
 Never edit this file directly.
 
-## Open
+## In Progress
 
 | Priority | Task | Summary | Next action | Owner |
 | --- | --- | --- | --- | --- |
-| P0 | [AR-0104](tasks/AR-0104.md): Accelerator worker: failure path, bounded submission, flush policy | A Vulkan error panics the worker (dispatch(..).unwrap()), so callers only see WorkerGone; the channel is unbounded; every flush prints to stderr; batch composition is never varied in tests. | Claim; write the failing test for a forced submission error first. | - |
+| P0 | [AR-0104](tasks/AR-0104.md): Accelerator worker: failure path, bounded submission, flush policy | A Vulkan error panics the worker (dispatch(..).unwrap()), so callers only see WorkerGone; the channel is unbounded; every flush prints to stderr; batch composition is never varied in tests. | Claim; write the failing test for a forced submission error first. | worker-ar0104 |
 
 ## Planned
 

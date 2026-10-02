@@ -9,9 +9,9 @@
 
 | Status | Meaning | Count |
 | --- | --- | ---: |
-| **In progress** | Claimed work with a live lease | 0 |
+| **In progress** | Claimed work with a live lease | 1 |
 | **In review** | Submitted by its worker, awaiting a coordinator decision | 0 |
-| **Open** | Dependency-ready and available to claim | 1 |
+| **Open** | Dependency-ready and available to claim | 0 |
 | **Blocked** | Cannot proceed until its recorded blocker clears | 0 |
 | **Planned** | Defined work awaiting promotion or dependencies | 7 |
 | **Future** | Deferred roadmap work | 0 |
@@ -32,7 +32,7 @@ flowchart LR
         AR_0101["AR-0101 - Planned"]:::status_planned
         AR_0102["AR-0102 - Planned"]:::status_planned
         AR_0103["AR-0103 - Planned"]:::status_planned
-        AR_0104["AR-0104 - Open"]:::status_open
+        AR_0104["AR-0104 - In progress"]:::status_in_progress
         AR_0105["AR-0105 - Planned"]:::status_planned
         AR_0106["AR-0106 - Planned"]:::status_planned
         AR_0107["AR-0107 - Planned"]:::status_planned
@@ -75,11 +75,11 @@ flowchart LR
 
 ## Complete AR inventory
 
-### Open (1)
+### In progress (1)
 
 | Priority | AR | Owner | Summary | Next action |
 | --- | --- | --- | --- | --- |
-| P0 | [AR-0104](tasks/AR-0104.md): Accelerator worker: failure path, bounded submission, flush policy | Unclaimed | A Vulkan error panics the worker (dispatch(..).unwrap()), so callers only see WorkerGone; the channel is unbounded; every flush prints to stderr; batch composition is never varied in tests. | Claim; write the failing test for a forced submission error first. |
+| P0 | [AR-0104](tasks/AR-0104.md): Accelerator worker: failure path, bounded submission, flush policy | worker-ar0104 | A Vulkan error panics the worker (dispatch(..).unwrap()), so callers only see WorkerGone; the channel is unbounded; every flush prints to stderr; batch composition is never varied in tests. | Claim; write the failing test for a forced submission error first. |
 
 ### Planned (7)
 
