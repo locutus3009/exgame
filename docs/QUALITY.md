@@ -118,7 +118,8 @@ Commits are expected to be signed and to carry a `Signed-off-by:` trailer matchi
 exactly. **Nothing checks this today.** Gate 12 in [QUALITY_GATES.md](QUALITY_GATES.md) specifies
 the check and AR-0006 built it as `tools/quality/check_commits.py`; the coordinator's
 `handoffctl check-commits` is not that
-check and does not examine product commits at all. Contributors certify their own authorship —
+check: it scans commit messages for private references and verifies neither signatures nor
+sign-offs. Contributors certify their own authorship —
 do not write another person's sign-off.
 
 ## Reuse

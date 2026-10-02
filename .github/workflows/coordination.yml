@@ -1,0 +1,465 @@
+# Verification of the coordination state under coordination/: the same sequence
+# coordination/SETUP.md gives a worker, plus three gates over the commits themselves.
+#
+# Unlike the product workflows, this one needs no GPU, so a hosted runner can run it. It is
+# nevertheless DORMANT, like every workflow in this repository: gate 11
+# (docs/QUALITY_GATES.md#11-repository-policy) forbids push, pull_request and schedule triggers,
+# so it starts only by hand. Arming it is a deliberate change to gate 11 and to the triggers
+# below, not an edit to this file alone. The concurrency and skip logic further down is kept
+# because it describes the live behaviour this workflow had when coordination state lived in
+# its own repository, and the behaviour it needs again once armed: state transactions push
+# chore(state) commits to main every few seconds while workers are active.
+#
+# INTEGRATOR: merge with a merge commit or a squash, never a rebase. A rebase merge rewrites
+# each commit and discards its GPG signature, and GitHub does not re-sign the result, so a
+# rebase merge would make the very next run of this workflow fail its own signature step. Merge
+# commits and squashes are re-signed by GitHub's web-flow key, which is on the allow-list below.
+#
+# KNOWN LIMITATION, observed rather than theorised when this workflow was live: a pull_request
+# run is only created if GitHub can compute the test merge of base and head when the event
+# fires. When main is pushed to every few seconds, a pull request opened during such a stream
+# has been seen to produce no run at all, with mergeability oscillating between clean and
+# unknown for minutes afterwards. GitHub does not retry. The cure is to push the branch again,
+# which fires a fresh synchronize event, so an integrator should check that a run exists rather
+# than assuming a quiet checks list means nothing to report.
+#
+# A red run is a signal to a human, not a gate, until this check is made a required status
+# check through branch protection.
+name: Coordination verification
+
+# Dormant: started by hand only (see the header). To arm it, once gate 11 permits it, restore
+#   push: {branches: [main]}  and  pull_request:
+# Push was filtered to main when this was live: a commit reaches main either through a pull
+# request, which the pull_request trigger covers, or by a direct push, so nothing is left
+# ungated, and the filter removes the duplicate run of an identical pull request head.
+"on":
+  workflow_dispatch:
+
+# Read-only. Nothing here writes to the repository, and the checkout keeps no credentials in
+# the working tree, so a compromised dependency in the quality environment cannot push.
+permissions:
+  contents: read # check out the commits under review; nothing here writes
+  # Read-only, and needed by the range step below: resolving the base as the last verified
+  # commit means asking this workflow's own run list what that commit was.
+  actions: read # read this workflow's own run list
+
+# Two properties are at stake here and they pull in opposite directions, so it is worth being
+# explicit about which line buys which.
+#
+# SAFETY. Four mechanisms can drop a range derived from a push event. A newer push cancels the
+# run. A newer push evicts a PENDING run, because the concurrency queue holds exactly one:
+# GitHub cancels an existing pending run when another arrives, so with A running, B pending and
+# C arriving, B is discarded and C's payload starts after B. A run dies on infrastructure
+# before it reaches the gate steps. And the state-transaction skip below produces a run that
+# verifies nothing. All four are tolerated, because the base is the last commit actually
+# VERIFIED and not the last commit pushed: the range step asks this workflow's run list for the
+# head of its most recent SUCCESSFUL run on this ref, so whatever a dropped run would have
+# covered is picked up by the next successful one. A cancelled or skipped run cannot be
+# mistaken for a verified one — GitHub concludes it "cancelled" or "skipped", never "success",
+# and the query filters on success.
+#
+# LIVENESS is a separate property and it does not follow from safety. If no run on a ref ever
+# succeeds, the base never advances, the range grows without bound, and the gate certifies
+# nothing while losing nothing. That is exactly what happened when this workflow first reached
+# main: state transactions arrive every few seconds while workers are active, and every one of
+# them created a run that joined this group and superseded whatever was in it. The run for the
+# merge commit was created at 17:32:31 and superseded three seconds later by a state push; its
+# job was terminated at 17:37:34 without ever completing. That state run was itself superseded
+# two minutes later by another, which skipped. Zero successful runs on main. Two changes fix
+# it. Every figure here is read from the run API, not estimated.
+#
+# First, a run that the job condition below will skip gets its own concurrency group. A skipped
+# run still enters a group and can cancel or evict a real one BEFORE its job condition is ever
+# evaluated, which is what killed the merge run; group membership therefore mirrors that
+# condition exactly, so state transactions contend only with each other and never with a run
+# that would verify something. The genuinely better fix is for such a push to create no run at
+# all, which GitHub supports natively through a [skip ci] marker in the commit message — but
+# that belongs to the tool that writes those messages, not to this file. Note what it would
+# NOT fix: the pull-request defect recorded above is caused by pushes to main, not by runs on
+# main, so suppressing runs leaves it exactly as it is.
+#
+# Second, cancellation is disabled on main and left on elsewhere. An earlier review rejected
+# this on the grounds that queue depth is one, so a pending run is evicted and its range lost.
+# That objection was aimed at a base derived from github.event.before, where a lost range is
+# never revisited. It does not apply to a base derived from the last successful run: an evicted
+# run simply never advances the pointer, and the next success starts where verification actually
+# stopped. Eviction is now safe, so main can queue — and it needs to queue, because queueing is
+# what lets a run finish. Elsewhere cancellation still costs nothing, since a pull request run
+# re-checks the whole base..head range before the branch can reach main.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ (github.event_name == 'push' && (github.event.deleted == true || startsWith(github.event.head_commit.message, 'chore(state):'))) && 'skipped' || 'verified' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  verify:
+    name: Strict state consistency
+    # Two skips, both at job level so that a skipped run consumes no runner minutes at all,
+    # which an early exit inside the job would not. A skipped run does still enter a
+    # concurrency group, and it does so before this condition is evaluated, so the group
+    # expression above mirrors this condition exactly and keeps such a run out of the group
+    # that verifying runs use. Keep the two in step: a change here that is not made there
+    # would put a skipping run back in a position to cancel a real one.
+    #
+    # The first skip is belt and braces: a branch deletion arrives as a push event carrying
+    # nothing to verify. With push filtered to main it can now only fire on a deletion of main
+    # itself, and it has never been observed to fire. It is untested.
+    #
+    # The second is a deliberate, measured cost trade. handoffctl runs the complete validate()
+    # — schema, reference graph, claim expiry, privacy and both generated views — under the
+    # coordination lock BEFORE it creates any chore(state) commit, and the next content push
+    # re-checks the whole tree from scratch regardless. Measured on the coordination
+    # repository's main before it moved in-tree: 98 commits, 89 of them chore(state) transactions, 90.8 per cent, in bursts of up to eight
+    # inside one minute against a job whose work takes about fifteen seconds. Billing is per
+    # push event at a one-minute rounded-up minimum, and handoffctl often pushes a reconcile and
+    # an update together, so the billed count is bounded above by the commit count rather than
+    # equal to it; either way the skip removes about nine runs in ten on main.
+    #
+    # Say the consequences plainly, because one of them is the normal path and not a corner
+    # case. A commit whose message begins "chore(state):" skips CI. push_replica() pushes HEAD
+    # unconditionally, so a content commit that has not been pushed yet rides along with the
+    # next state commit and the whole push is skipped, since the condition can only read the
+    # head commit. In the coordination repository every content commit reached main exactly
+    # this way, by direct push followed within seconds by state commits. That is safe ONLY because
+    # the base is the last verified commit: the next non-skipped run's range begins at the last
+    # thing actually verified, so a content commit that rode along is covered then rather than
+    # lost. It is not safe on its own, and it would not be safe if the base came from
+    # github.event.before. It is also acceptable only while no branch protection exists for
+    # such a commit to bypass — see the header — and while the threat model is drift, not an
+    # adversary. Revisit both before arming this workflow on a public repository.
+    if: >-
+      github.event_name != 'push'
+      || (github.event.deleted != true
+          && !startsWith(github.event.head_commit.message, 'chore(state):'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+        working-directory: coordination
+    env:
+      # The project signing key (config/allowed-keys.asc), then GitHub's two web-flow signing
+      # keys, which sign the commits a merge or squash through the web interface produces.
+      # Refresh the latter with: gh api users/web-flow/gpg_keys --jq '.[].key_id'. Deliberately
+      # a static list: this goes red and a human edits it, which is the correct direction to
+      # fail for a gate that decides whose commits are acceptable. THREE things trigger that
+      # edit. GitHub rotating a web-flow key is the obvious one. The second is a signing SUBKEY
+      # being added to the project key: the keys listed here are primaries with no subkeys, but
+      # GnuPG prefers a signing subkey once one exists, the issuer packet would then carry the
+      # subkey's id, and every commit would be rejected until that id is added here. The third
+      # is the owner signing with a different key of their own: only the project key is
+      # accepted, so a commit signed with any other key is rejected on sight. That is the
+      # intended strictness of naming a key rather than accepting anyone GitHub knows.
+      MAX_INTRODUCED: "2000"
+      MAX_INDIVIDUAL_LOOKUPS: "100"
+      SIGNING_KEY_IDS: "25DB2FB39C1190A9 4AEE18F83AFDEB23 B5690EEEBB952194"
+    steps:
+      # Every action is pinned by full commit id, never by tag, so a moved tag cannot silently
+      # change what runs. fetch-depth 0 is required: the commit gates below need the introduced
+      # commits and the base they were branched from.
+      - name: Check out the reviewed commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      # The private runtime configuration holds the GitHub repository and a push switch, and
+      # may hold an absolute project root. It is gitignored, and it must never reach a runner:
+      # proving its absence here is cheap and turns "we think it is untracked" into a checked
+      # fact. Paths in run steps are relative to coordination/, the default working directory.
+      - name: Prove the private runtime state is absent from the checkout
+        run: |
+          set -euo pipefail
+          test ! -e .runtime/config.json
+          test -z "$(git ls-files .runtime)"
+          test -z "$(git ls-files private-archive)"
+          echo "no runtime configuration and no private archive in the checked-out tree"
+
+      # The commit gates must see the introduced range and nothing else: scanning full history
+      # would re-report every historical finding on each unrelated change and train everyone to
+      # ignore the gate.
+      #
+      # On a pull request the range is base..head, which is what the reviewer of that pull
+      # request is being asked to accept. Note that a pull request is NOT re-verified when its
+      # base moves — pull_request fires on opened, synchronize and reopened only — and with no
+      # branch protection there is no "must be up to date" rule to compensate, so a green run
+      # attests to the head against the base it was last pushed against, not against current
+      # main.
+      #
+      # Otherwise the base is the head of the most recent SUCCESSFUL run of this workflow on
+      # this ref, which is the last commit this gate actually verified. That is deliberately
+      # not github.event.before: a pushed range is lost for good whenever a run is cancelled,
+      # evicted while pending, killed by infrastructure, or skipped as a state transaction, and
+      # nothing would ever revisit it. Starting from the last verified commit makes every one of
+      # those self-healing. github.event.before is kept only as a fallback for the first run on
+      # a ref, and if neither resolves the step fails closed rather than verifying an empty
+      # range and reporting success.
+      - name: Resolve the introduced commit range
+        id: range
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          REF_NAME: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          resolves() {
+            test -n "${1:-}" && git rev-parse --verify --quiet "${1}^{commit}" >/dev/null
+          }
+          if test "$EVENT_NAME" = pull_request; then
+            base="$PR_BASE"
+            head="$PR_HEAD"
+            origin="pull request base"
+            if ! resolves "$base"; then
+              echo "::error::pull request base ${base} is not present in the checkout"
+              exit 1
+            fi
+          else
+            head="$PUSH_AFTER"
+            base=""
+            origin=""
+            # Read the run list, and distinguish "no successful run yet" from "could not
+            # ask". They are identical if the exit status is discarded, because gh writes an
+            # HTTP error body to stdout: the query would yield a JSON blob, fail the resolves
+            # test, and fall silently through to the pushed range while logging that no
+            # successful run exists. That is exactly the loss this step exists to prevent,
+            # wearing a log line that asserts the opposite, so a failed query fails the run.
+            # A 404 cannot mean "this workflow is not registered yet", because the query is
+            # being made by a run of this very workflow; a 403 would mean the actions: read
+            # permission above was lost, which must be loud rather than silently degrading.
+            errors="$(mktemp)"
+            if ! verified="$(gh api \
+              "repos/${REPOSITORY}/actions/workflows/coordination.yml/runs" \
+              -X GET -f branch="$REF_NAME" -f status=success -f per_page=1 \
+              --jq '.workflow_runs[0].head_sha // ""' 2>"$errors")"; then
+              echo "::error::could not read this workflow's run list; refusing to guess a base"
+              sed 's/^/  gh: /' "$errors" >&2 || true
+              printf '%s\n' "$verified" | sed 's/^/  gh: /' >&2 || true
+              exit 1
+            fi
+            # The ancestor test does more than reject a rewritten or diverged line: it is also
+            # what stops a candidate from a fork or from an unrelated event being adopted,
+            # since the run list is filtered by ref but not by event.
+            if resolves "$verified" && git merge-base --is-ancestor "$verified" "$head"; then
+              base="$verified"
+              origin="head of the last successful run on ${REF_NAME}"
+            elif resolves "$PUSH_BEFORE" && git merge-base --is-ancestor "$PUSH_BEFORE" "$head"; then
+              base="$PUSH_BEFORE"
+              origin="pushed range; run list read, no usable successful run for ${REF_NAME}"
+            else
+              echo "::error::no verified base and no usable pushed range; refusing to verify nothing"
+              exit 1
+            fi
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "head=$head" >> "$GITHUB_OUTPUT"
+          echo "introduced range ${base}..${head} (base: ${origin})"
+          git log --oneline --no-decorate "${base}..${head}" | head -50
+          echo "$(git rev-list --count "${base}..${head}") commit(s) introduced"
+
+      - name: Install the locked quality environment
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.8"
+          enable-cache: false
+
+      # --locked, not --frozen: uv must refuse to run at all if uv.lock no longer agrees with
+      # pyproject.toml, rather than quietly resolving something else. The group also installs
+      # lizard, radon and pre-commit, which nothing below invokes; that is recorded as a known
+      # gap in the quality sequence rather than papered over here.
+      - name: Locked quality environment
+        run: uv sync --locked --only-group quality
+
+      - name: Formatting and typing
+        run: |
+          set -euo pipefail
+          uv run ruff format --check tools tests
+          uv run ruff check --no-fix tools tests
+          uv run mypy tools/handoffctl.py tools/status_renderer.py tests
+
+      - name: Fault tests and coverage
+        run: |
+          set -euo pipefail
+          uv run coverage run --branch -m unittest discover -s tests -p 'test_*.py'
+          uv run coverage report --fail-under=95
+
+      # render-status --check is the mechanism that stops a generated view drifting from the
+      # task files it is derived from, and git diff --exit-code proves that nothing in this
+      # sequence rewrote the tree to make itself pass. tasks/, STATUS.md and CURRENT.md are
+      # never excluded by a paths filter: they are precisely what these two commands validate.
+      - name: Schema, generated views and tree cleanliness
+        run: |
+          set -euo pipefail
+          uv run python tests/validate_schema.py
+          tools/handoffctl render-status --check
+          tools/handoffctl doctor
+          git diff --exit-code
+          test -z "$(git status --porcelain --untracked-files=normal)"
+          test ! -e .runtime/config.json
+
+      # Developer Certificate of Origin. The trailer must match the commit's own author
+      # character for character, so a trailer copied from someone else does not pass. Merge
+      # commits are excluded here and only here: a merge produced by the GitHub web interface
+      # cannot carry a trailer at all, so requiring one would make every integration fail. A
+      # consequence worth recording: a range containing nothing but merges certifies zero
+      # commits and passes vacuously. That is harmless only because the signature step below
+      # does cover merges, so such a range is not unchecked, merely uncertified.
+      - name: Certify sign-off on every introduced commit
+        env:
+          RANGE_BASE: ${{ steps.range.outputs.base }}
+          RANGE_HEAD: ${{ steps.range.outputs.head }}
+        run: |
+          set -euo pipefail
+          certified=0
+          for revision in $(git rev-list --no-merges "${RANGE_BASE}..${RANGE_HEAD}"); do
+            expected="$(git show -s --format='Signed-off-by: %an <%ae>' "$revision")"
+            message="$(git show -s --format=%B "$revision")"
+            if ! grep -Fxq -- "$expected" <<<"$message"; then
+              echo "::error::${revision} does not carry its own trailer: ${expected}"
+              exit 1
+            fi
+            certified=$((certified + 1))
+          done
+          echo "certified ${certified} introduced commit(s)"
+
+      # The same privacy rules handoffctl applies to the working tree, applied to commit
+      # messages: absolute home paths, private addresses, credential-shaped strings and agent
+      # session references. Scoped to the introduced range for the reason given above.
+      - name: Privacy gate on introduced commit messages
+        env:
+          RANGE_BASE: ${{ steps.range.outputs.base }}
+          RANGE_HEAD: ${{ steps.range.outputs.head }}
+        run: tools/handoffctl check-commits --base "$RANGE_BASE" --head "$RANGE_HEAD"
+
+      # Two assertions per commit, and it is worth being exact about what each buys.
+      #
+      # GitHub's attestation says the signature is cryptographically valid over the commit and
+      # was made by a key registered to an account with a matching verified email. On its own
+      # that is satisfied by ANY collaborator's key and by GitHub's own web-flow key, which is
+      # weaker than SETUP.md specifies, so this also reads the issuer key id out of the blob
+      # GitHub verified and requires it to be on the allow-list above. The blob is required to
+      # be a PGP signature armour whose first packet is a signature and which contains exactly
+      # one signature packet, before its key id is read, so this is a signature reader and not a
+      # general packet scraper: without those checks an armoured public key block would happily
+      # yield a key id out of a self-signature. That is belt and braces in any case, because the
+      # attestation test above runs first and GitHub only reports verified for something it
+      # verified as a commit signature.
+      # gpg is used only as a packet parser; no key material and no secret is involved. A
+      # 64-bit key id is not collision-proof by itself, but it is not being asked to
+      # authenticate anything — GitHub already verified against the real registered key — only
+      # to name which key that was.
+      #
+      # This is still GitHub's attestation of a specific key, not a local cryptographic check.
+      # It also cannot attest a commit absent from this repository, so a pull request from a
+      # fork would need a different mechanism.
+      #
+      # Merges are NOT excluded here. GitHub signs the merges it creates, so excluding them
+      # would buy nothing and would leave an evil-merge hole: a locally crafted merge whose
+      # tree differs from the mechanical merge introduces content that is otherwise neither
+      # certified nor signed.
+      #
+      # Because the base is the last verified commit rather than the last pushed one, a range
+      # can be long after a run of skipped state transactions. Verification is therefore
+      # fetched in pages of 100 from the commit list endpoint, which carries the same
+      # verification object as the single-commit endpoint, with individual lookups only for
+      # anything a page did not cover. Both are capped so the number of API calls is bounded
+      # and an absurd range fails closed instead of exhausting the token's rate limit. Recorded
+      # rather than fixed: both caps live in this last step, so a pathological range runs the
+      # sign-off loop and check-commits first, bounded before then only by the job timeout.
+      # That is a cost and latency question rather than a correctness one, because every path
+      # here still fails closed.
+      - name: Verify attested signatures on every introduced commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RANGE_BASE: ${{ steps.range.outputs.base }}
+          RANGE_HEAD: ${{ steps.range.outputs.head }}
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+
+          git rev-list "${RANGE_BASE}..${RANGE_HEAD}" > "${work}/revisions"
+          total="$(wc -l < "${work}/revisions")"
+          if test "$total" -eq 0; then
+            echo "no commits introduced since the last verified commit"
+            exit 0
+          fi
+          if test "$total" -gt "$MAX_INTRODUCED"; then
+            echo "::error::${total} introduced commits exceeds the ${MAX_INTRODUCED} cap; inspect this range by hand"
+            exit 1
+          fi
+
+          declare -A pending=()
+          while read -r revision; do pending["$revision"]=1; done < "${work}/revisions"
+
+          page=1
+          page_cap=$(( total / 100 + 3 ))
+          while test "${#pending[@]}" -gt 0 && test "$page" -le "$page_cap"; do
+            gh api "repos/${REPOSITORY}/commits?sha=${RANGE_HEAD}&per_page=100&page=${page}" \
+              --jq '.[] | [.sha, (.commit.verification.verified | tostring),
+                           (.commit.verification.reason // "none"),
+                           (.commit.verification.signature // "" | @base64)] | @tsv' \
+              > "${work}/page.tsv"
+            test -s "${work}/page.tsv" || break
+            while IFS=$'\t' read -r sha rest; do
+              if test -n "${pending[$sha]:-}"; then
+                printf '%s\n' "$rest" > "${work}/v-${sha}"
+                unset 'pending[$sha]'
+              fi
+            done < "${work}/page.tsv"
+            page=$(( page + 1 ))
+          done
+
+          if test "${#pending[@]}" -gt "$MAX_INDIVIDUAL_LOOKUPS"; then
+            echo "::error::${#pending[@]} commits were not covered by the paged listing, above the ${MAX_INDIVIDUAL_LOOKUPS} lookup cap"
+            exit 1
+          fi
+          for revision in "${!pending[@]}"; do
+            gh api "repos/${REPOSITORY}/commits/${revision}" \
+              --jq '[(.commit.verification.verified | tostring),
+                     (.commit.verification.reason // "none"),
+                     (.commit.verification.signature // "" | @base64)] | @tsv' \
+              > "${work}/v-${revision}"
+          done
+
+          while read -r revision; do
+            IFS=$'\t' read -r verified reason encoded < "${work}/v-${revision}"
+            if test "$verified" != true; then
+              echo "::error::${revision} has no verified signature (${reason})"
+              exit 1
+            fi
+            printf '%s' "$encoded" | base64 -d > "${work}/signature.asc"
+            if ! head -1 "${work}/signature.asc" | grep -Fxq -- '-----BEGIN PGP SIGNATURE-----'; then
+              echo "::error::${revision} is not signed with a PGP signature block"
+              exit 1
+            fi
+            packets="$(gpg --batch --list-packets "${work}/signature.asc" 2>"${work}/gpg.err" || true)"
+            first="$(grep -m1 '^:[a-z].*packet:' <<<"$packets" || true)"
+            if test "${first#:signature packet:}" = "$first"; then
+              echo "::error::${revision}: the blob's first packet is not a signature (${first:-none})"
+              sed 's/^/  gpg: /' "${work}/gpg.err" >&2 || true
+              exit 1
+            fi
+            found="$(grep -c '^:signature packet:' <<<"$packets" || true)"
+            if test "${found:-0}" -ne 1; then
+              echo "::error::${revision} carries ${found:-0} signature packets, expected exactly one"
+              sed 's/^/  gpg: /' "${work}/gpg.err" >&2 || true
+              exit 1
+            fi
+            key_id="$(sed -n 's/^:signature packet: .*keyid \([0-9A-F]\{16\}\).*$/\1/p' <<<"$packets" || true)"
+            if test -z "$key_id"; then
+              echo "::error::${revision} has a signature packet with no readable issuer key id"
+              printf '%s\n' "$packets" | sed 's/^/  gpg: /' >&2
+              exit 1
+            fi
+            if ! grep -Fqw -- "$key_id" <<<"$SIGNING_KEY_IDS"; then
+              echo "::error::${revision} is signed by ${key_id}, which is not an accepted key"
+              exit 1
+            fi
+          done < "${work}/revisions"
+          echo "all ${total} introduced commit(s) are signed by an accepted key GitHub attests as valid"

@@ -3,19 +3,26 @@
 This is the canonical process for working on `game-experiment`. It is not advice. A change
 that did not go through it is not integrable, however good the code is.
 
-Coordination state — tasks, plans, milestones, leases and evidence — lives in the sibling
-`game-coordinator` checkout, not here. This repository holds the product. The paths below are
-written relative to a product worktree, so `../game-coordinator/tools/handoffctl` is the tool.
-The absolute location of both checkouts is local configuration and never belongs in a commit
-message, a task note or a tracked file.
+Coordination state — tasks, plans, milestones, leases and evidence — lives in this repository,
+under [`coordination/`](../coordination/README.md), and is written only by its tool,
+`coordination/tools/handoffctl`, run from the **canonical checkout on `main`**. A worker's own
+worktree carries a copy of the tool, but `handoffctl` refuses to write state from a linked
+worktree or from any other branch; workers call the canonical checkout's copy by its path. In the
+commands below, `CANONICAL` stands for that checkout. Its absolute location is local
+configuration and never belongs in a commit message, a task note or a tracked file. Setup, and
+the reasons for each of these rules, are in [coordination/SETUP.md](../coordination/SETUP.md).
+
+The task set restarted from empty when the project was published. AR numbers below AR-0100 cited
+in this and other documents are the retired M0 series, recorded in
+[coordination/HISTORY.md](../coordination/HISTORY.md).
 
 Read this document with [QUALITY.md](QUALITY.md) (what is actually enforced, and what is only
 promised) and [QUALITY_GATES.md](QUALITY_GATES.md) (the gate list itself).
 
 ## The unit of work
 
-The unit of work is an **AR** — one numbered task file in the coordination repository, with a
-plan beside it. An AR names its own outcome, its dependencies, the exact set of paths it owns,
+The unit of work is an **AR** — one numbered task file under `coordination/tasks/`, with a
+plan beside it in `coordination/plans/`. An AR names its own outcome, its dependencies, the exact set of paths it owns,
 its branch and its worktree.
 
 **One worker owns one AR, one branch and one worktree at a time.** Not two ARs, not one AR on
@@ -52,20 +59,22 @@ worker deciding it is ready.
 ### 2. Claim, with a lease
 
 ```sh
-../game-coordinator/tools/handoffctl claim AR-NNNN --owner WORKER_ID --lease-minutes 180
+CANONICAL/coordination/tools/handoffctl claim AR-NNNN --owner WORKER_ID --lease-minutes 180
 ```
 
 The claim is a lease, not a lock forever. It records an owner and an expiry. An expired lease
 means the coordinator may hand the work to someone else — so an expired lease also means *you*
 must reconcile before touching anything, because the tree may have moved.
 
-Create the worktree and branch the AR names, from the canonical checkout. Never work directly
-in the canonical checkout, and never leave a worktree on `main`.
+Create the worktree and branch the AR names, from the canonical checkout, at
+`coordination/workspaces/AR-NNNN` (gitignored). Never work directly in the canonical checkout,
+and never leave a worktree on `main`: the canonical checkout stays on `main` because it is the
+one place state transactions run.
 
 ### 3. Heartbeat
 
 ```sh
-../game-coordinator/tools/handoffctl heartbeat AR-NNNN --owner WORKER_ID --lease-minutes 180
+CANONICAL/coordination/tools/handoffctl heartbeat AR-NNNN --owner WORKER_ID --lease-minutes 180
 ```
 
 Heartbeat before the lease expires, not after. A silently expired lease on work that is in fact
@@ -74,7 +83,7 @@ progressing is indistinguishable, from outside, from an abandoned worker.
 ### 4. Run commands through the wrapper
 
 ```sh
-../game-coordinator/tools/handoffctl run --owner WORKER_ID AR-NNNN -- COMMAND ARGUMENTS
+CANONICAL/coordination/tools/handoffctl run --owner WORKER_ID AR-NNNN -- COMMAND ARGUMENTS
 ```
 
 The wrapper records the command by argv digest together with its exit code, against the task.
@@ -89,7 +98,7 @@ usual way a private path or a credential escapes into it.
 ### 5. Record evidence as you go
 
 ```sh
-../game-coordinator/tools/handoffctl update AR-NNNN --owner WORKER_ID \
+CANONICAL/coordination/tools/handoffctl update AR-NNNN --owner WORKER_ID \
     --expected-revision N --note "what happened, what it proves, what is still unknown"
 ```
 
@@ -111,9 +120,9 @@ Be clear about how much of that is actually checked, because it is less than it 
 
 - **Nothing is hooked into `git push`.** There is no pre-push hook. Every check below is
   something a person or a gate runs.
-- **`handoffctl check-commits` scans commit messages in the *coordinator* repository.** It
-  hardcodes its own repository root, so running it from a product worktree does not examine
-  product commits — against an empty range it prints OK. Use it for coordinator commits.
+- **`handoffctl check-commits` is a message-privacy scan only.** It runs against this
+  repository, so it does examine product commits, but it checks no signature and no sign-off.
+  `tools/quality/check_commits.py` (gate 12) is the full check.
 - **Its pattern list is partial.** It catches Linux absolute home paths (a leading `/home`
   segment), Windows user paths, `password`/`token`/`secret`/`api_key` assignments, private-key
   blocks, agent session references and session-like UUIDs, and IP addresses in `10.*` and `127.*`
@@ -146,6 +155,11 @@ most of it.
 Product changes land through a pull request against `main`, reviewed at an exact head. Not by
 pushing to `main`, not by a fast-forward, not by a merge of a stale branch.
 
+The one exception is coordination state. `handoffctl` commits each transaction straight to
+`main` as a signed, signed-off `chore(state):` commit touching only `coordination/`, after its own
+full validation under its lock. A change to the coordinator's *code*, schemas or tests is product
+work and goes through a pull request like any other.
+
 ```sh
 git commit -S -s
 ```
@@ -166,7 +180,7 @@ serialize through the coordinator. A failed required gate preempts further featu
 When the work is finished, you do not decide that it is done. You hand it over:
 
 ```sh
-../game-coordinator/tools/handoffctl submit AR-NNNN --owner WORKER_ID --note "..."
+CANONICAL/coordination/tools/handoffctl submit AR-NNNN --owner WORKER_ID --note "..."
 ```
 
 `submit` names no destination status, and that is deliberate: it makes self-certification
@@ -190,7 +204,7 @@ is complete.
 ### 9. Review — the coordinator's decision
 
 ```sh
-../game-coordinator/tools/handoffctl review AR-NNNN --reviewer WHO --expected-revision N \
+CANONICAL/coordination/tools/handoffctl review AR-NNNN --reviewer WHO --expected-revision N \
     --status done --note "..."
 ```
 
@@ -225,8 +239,8 @@ Reconcile before repeating anything. After a crash, a timeout or an expired leas
 state, the Git refs, the worktrees and any open pull request can all disagree.
 
 ```sh
-../game-coordinator/tools/handoffctl reconcile --commit --push
-../game-coordinator/tools/handoffctl doctor --live
+CANONICAL/coordination/tools/handoffctl reconcile --commit --push
+CANONICAL/coordination/tools/handoffctl doctor --live
 ```
 
 An expired lease permits investigation. It does not authorize repeating an ambiguous external

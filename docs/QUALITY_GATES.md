@@ -300,8 +300,8 @@ Two limitations belong here, because this is where a reader looks for them. Firs
 toolchain `cargo-llvm-cov` reports line and region coverage, **not branch coverage** -- the
 report it writes carries a branches block whose count is zero, and obtaining a real one would need
 a nightly toolchain and `cargo llvm-cov --branch`, which contradicts the pin in
-`rust-toolchain.toml`. A percentage here is not comparable to the coordinator repository's
-branch-aware floor. Second, **coverage establishes exercised lines, not correctness**: it is a
+`rust-toolchain.toml`. A percentage here is not comparable to the coordinator's
+branch-aware floor (a Python coverage.py figure, in `coordination/pyproject.toml`). Second, **coverage establishes exercised lines, not correctness**: it is a
 regression constraint on what the suite touches and says nothing about whether the behaviour is
 right. Do not lower a floor, hide production code from the denominator, or refresh a baseline in
 order to pass.
@@ -415,10 +415,10 @@ implementing "the commit signature and sign-off check". It must live in the **pr
 repository and operate on the **product** repository.
 
 It must not be confused with the coordinator's `handoffctl check-commits`. That command is a
-message-privacy scan only — it performs no signature verification and no sign-off check — and it
-hardcodes `git -C <coordinator root>`, so invoking it from a product worktree does not examine
-product commits at all. Run against this branch it reported OK while examining an empty revision
-range in the coordinator. It is useful for coordinator commits and is not a product gate.
+message-privacy scan only — it performs no signature verification and no sign-off check. When
+coordination lived in its own repository it also ran `git -C <coordinator root>`, so from a product
+worktree it examined no product commit at all and reported OK over an empty range; since the move
+to `coordination/` it scans this repository's commits, but it is still not a product gate.
 
 Over the introduced range `base..head` in the product repository, for every commit:
 
