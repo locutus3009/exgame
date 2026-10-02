@@ -8,7 +8,8 @@ commits that touch only coordination state.
 | `game-experiment` | `main` | `9f2de2e6b26a` | 0 | behind 0, ahead 0 |
 | `AR-0101` | `feature/ar-0101-world-growth` | `2e504b577c7c` | 0 | behind 1, ahead 0 |
 | `AR-0102` | `feature/ar-0102-writer-invariant` | `2c113a62ece9` | 0 | behind 0, ahead 0 |
-| `AR-0104` | `feature/ar-0104-worker-failures` | `d5fbdd0a9b73` | 0 | behind 0, ahead 2 |
+| `AR-0104` | `feature/ar-0104-worker-failures` | `d5fbdd0a9b73` | 1 | behind 0, ahead 2 |
+| changed files | - | - | - | `crates/newton/src/accelerator/mod.rs` |
 | `AR-0105` | `fix/ar-0105-slot-drop-deadlock` | `3d1887d4be15` | 2 | behind 3, ahead 0 |
 | changed files | - | - | - | `crates/newton/src/integrator/implicit/cache.rs`, `crates/newton/src/integrator/implicit/newton.rs` |
 | `AR-0106` | `feature/ar-0106-fatal-semantics` | `2e87601a7fb0` | 0 | behind 2, ahead 0 |
