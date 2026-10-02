@@ -84,6 +84,11 @@ will check — so if the two ever disagree, believe `CLAUDE.md`.
 
 Compute is vulkano; the only wgpu is in `melies`. No first-party crate depends on `ash`.
 
+Outside the crates, [`coordination/`](coordination/README.md) holds the development process's
+own state: milestones, numbered tasks with their plans and evidence logs, and `handoffctl`, the
+tool that writes them. [`coordination/HISTORY.md`](coordination/HISTORY.md) records what was
+done before the project was published and why the task set restarted from empty.
+
 ## Where to read next
 
 - [CLAUDE.md](CLAUDE.md) (also `AGENTS.md`) — the orientation entry point: what exists, the
@@ -94,10 +99,15 @@ Compute is vulkano; the only wgpu is in `melies`. No first-party crate depends o
 - [docs/README.md](docs/README.md) — which documentation system is authoritative and why.
 - [ACCELERATOR.md](ACCELERATOR.md) — the GPU subsystem in detail.
 - [docs/architecture/overview.md](docs/architecture/overview.md) — the design index.
+- [coordination/README.md](coordination/README.md) — the task coordinator: milestones, tasks,
+  leases and the transitions between them.
 
 ## Contributing
 
-Work is coordinated through numbered tasks; one worker owns one task, one branch and one
+Development is agent-driven and coordinated through numbered tasks kept in
+[`coordination/`](coordination/README.md). A worker, human or agent, claims a task under a lease,
+records evidence as it goes, and submits the result; it never marks its own work done. Only an
+independent reviewer can move a task to `done`. One worker owns one task, one branch and one
 worktree at a time, and edits only the paths that task lists. Commits are signed and carry a
 `Signed-off-by:` trailer matching the author exactly. See
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
