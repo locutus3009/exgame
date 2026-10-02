@@ -110,6 +110,7 @@ is no GUI host at present.
 | [planned/relativistic-renderer](./planned/relativistic-renderer.md) | Two-view design; HDR + spectral; aberration; analytic starfield. |
 | [planned/setting](./planned/setting.md) | Sketch of the eventual game setting (G-star + pseudo-Saturn + habitable moon + other large bodies); intent capture, not invariant. |
 | [planned/setting-patera](./planned/setting-patera.md) | The long-form working draft behind that sketch: the Pater system, Terra, the epochs, and the open threads, with `[OPEN]` / `[TENT.]` markers on what is not settled. Intent capture, not invariant. |
+| [planned/roadmap](./planned/roadmap.md) | Proposed milestones after M2 (forkable state and determinism, the whole Pater system, a graphics pipeline beside compute, performance with a frame budget, vessels, a first playable game), derived from the design record; records the decided scalar split (`f32` local physics, fixed-point frames). Proposal, not plan. |
 | [planned/implicit-solver-energy-hessian](./planned/implicit-solver-energy-hessian.md) | Design report for an implicit step in which the user supplies only energy functionals and the kernel differentiates everything, geometry and force laws alike, into a mechanism Hessian. **Not what is implemented** — the shipped implicit path is penalty joints with `Differential` Jacobians and a Newton–Schulz block solve. |
 
 ## Lessons (retrospective archeology)
