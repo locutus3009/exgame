@@ -1478,10 +1478,8 @@ mod tests {
     /// A topology change drops the island's cache (the dimension changes), and this must not
     /// be visible in the physics: a cold cache has no right to cause a jolt.
     #[tokio::test]
-    #[ignore]
     async fn topology_change_causes_no_visible_jolt() {
         async fn chain(detach_at: Option<usize>, steps: usize) -> f32 {
-            // FIXME: deadlock?
             let world = Arc::new(World::builder().usual::<f32>());
             let mech = Mechanism::<f32, f32>::new(ImplicitIntegrator::Newton(Newton::<f32>::new(
                 accel(world.clone()),

@@ -624,13 +624,23 @@ impl<T: Scalar + Pod> NewtonCache<T> {
             self.rhs = Arc::from(rhs);
             self.scale = Arc::from(scale);
             self.dv = Arc::from(dv);
-            {
+            // Allocate under the guard, assign after it is released: on a resize
+            // the assignment drops the previous keys, and a key's `Drop` takes
+            // `world.write::<T>()` itself — under the guard that is a self-deadlock
+            // on the non-reentrant lock.
+            let (half, floor2, pose_factor, vel_factor) = {
                 let mut map = world.write::<T>();
-                self.half_slot = Some(map.add(T::ZERO));
-                self.floor2_slot = Some(map.add(T::ZERO));
-                self.pose_factor_slot = Some(map.add(T::ZERO));
-                self.vel_factor_slot = Some(map.add(T::ZERO));
-            }
+                (
+                    map.add(T::ZERO),
+                    map.add(T::ZERO),
+                    map.add(T::ZERO),
+                    map.add(T::ZERO),
+                )
+            };
+            self.half_slot = Some(half);
+            self.floor2_slot = Some(floor2);
+            self.pose_factor_slot = Some(pose_factor);
+            self.vel_factor_slot = Some(vel_factor);
             self.all_columns = Arc::from((0..m).collect::<Vec<_>>());
             // The contraction measure's partials, and the rows that fold `R` into
             // them. `R` is `m²` blocks whose target is the identity on the diagonal
@@ -1275,9 +1285,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn dimension_change_reallocates_and_clears_the_hint() {
-        // FIXME: deadlock?
         let world = Arc::new(World::builder().usual::<f32>());
         let mut cache = NewtonCache::<f32>::new();
         let b = ids(3);
