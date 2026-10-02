@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 
+use super::row::Row;
 use super::{MessageInput, MessageKind, MessagePayload, Pending, PipelineBindPoint};
 use crate::EvalError;
 use aristotle::World;
@@ -211,6 +212,205 @@ struct Bound {
     generations: Vec<u64>,
 }
 
+/// One OUTPUT column of a row layout: the row word that names the slot, and the
+/// world storage that slot lives in.
+#[derive(Clone, Copy)]
+pub(super) struct Col {
+    word: usize,
+    id: fn() -> TypeId,
+    name: fn() -> &'static str,
+}
+
+/// Where a row-driven kind's OUTPUT slots sit in its row — the write half of
+/// the stage's word layout (`rows/`), next to the binding list in the table
+/// below. Read slots are not listed: two invocations may read one slot, and one
+/// invocation may read and write its own (Gather seeds `out` from itself); only
+/// two WRITERS of one slot in one batch break the storage's invariant.
+///
+/// A row carries `count` records (`None`: exactly one) of `stride` words from
+/// word `base`, and each record writes the slots its `cols` name.
+#[derive(Clone, Copy)]
+pub(super) struct Writes {
+    count: Option<usize>,
+    base: usize,
+    stride: usize,
+    cols: &'static [Col],
+}
+
+impl Writes {
+    /// Every `(storage, slot)` the row writes; `Err` if the row's record count
+    /// runs past its end, which no baker produces.
+    fn each(&self, row: &Row, mut f: impl FnMut(&Col, u32)) -> Result<(), String> {
+        let n = self.count.map_or(1, |w| row[w] as usize);
+        for k in 0..n {
+            let at = self.base + k * self.stride;
+            for c in self.cols {
+                let slot = row.get(at + c.word).ok_or_else(|| {
+                    format!("flush refused: a row declares {n} records, more than it holds")
+                })?;
+                f(c, *slot);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A row with one record: `writes!(word => Type, …)`. With `per count, base,
+/// stride;` in front, the row carries `row[count]` records.
+macro_rules! writes {
+    (per $count:expr, $base:expr, $stride:expr; $($word:expr => $ty:ty),* $(,)?) => {
+        Writes {
+            count: Some($count),
+            base: $base,
+            stride: $stride,
+            cols: &[$(Col {
+                word: $word,
+                id: TypeId::of::<$ty>,
+                name: std::any::type_name::<$ty>,
+            }),*],
+        }
+    };
+    ($($word:expr => $ty:ty),* $(,)?) => {
+        Writes {
+            count: None,
+            base: 0,
+            stride: 0,
+            cols: &[$(Col {
+                word: $word,
+                id: TypeId::of::<$ty>,
+                name: std::any::type_name::<$ty>,
+            }),*],
+        }
+    };
+}
+
+/// Slots of one storage claimed in the current flush, as a bitset over raw slot
+/// indices. `touched` lists the words that went non-zero, so clearing costs what
+/// the flush wrote rather than the storage's capacity.
+#[derive(Default)]
+struct Claimed {
+    bits: Vec<u64>,
+    touched: Vec<usize>,
+}
+
+impl Claimed {
+    /// Claim `slot`; `false` if it was already claimed.
+    fn claim(&mut self, slot: u32) -> bool {
+        let (w, b) = (slot as usize / 64, 1u64 << (slot % 64));
+        if w >= self.bits.len() {
+            self.bits.resize(w + 1, 0);
+        }
+        let word = &mut self.bits[w];
+        if *word & b != 0 {
+            return false;
+        }
+        if *word == 0 {
+            self.touched.push(w);
+        }
+        *word |= b;
+        true
+    }
+
+    fn clear(&mut self) {
+        for w in self.touched.drain(..) {
+            self.bits[w] = 0;
+        }
+    }
+}
+
+#[derive(Default)]
+struct LedgerState {
+    /// Kinds set up in the current flush whose `check` has not run yet. Every
+    /// non-empty batch gets exactly one `setup` and, once the submission is
+    /// done, one `check`; a `setup` that finds this at zero opens a new flush.
+    open: usize,
+    /// Per output storage, the slots claimed so far in this flush.
+    claimed: Vec<(TypeId, Claimed)>,
+    /// Why this flush was refused, once it has been.
+    refused: Option<String>,
+}
+
+/// The one-writer-per-slot check (ACCELERATOR.md Part III), shared by every
+/// kind of one accelerator because a flush spans kinds.
+///
+/// Each `setup` claims the output slots of every row it is about to dispatch.
+/// A slot claimed twice in one flush — by two rows of one kind or by two kinds —
+/// REFUSES the flush: the kind that found the collision and every kind set up
+/// after it dispatch nothing, and `check` fails every message of the flush with
+/// `EvalError::Backend`. Kinds already recorded before the collision was seen
+/// did run (`Shaders::dispatch` records each kind as it sets it up, so a later
+/// kind cannot withdraw an earlier one), but they ran without the colliding
+/// writer, and their callers are failed all the same: the flush as a whole
+/// broke the invariant.
+#[derive(Default)]
+pub(super) struct Ledger(Mutex<LedgerState>);
+
+impl Ledger {
+    /// Open the kind's part of the flush and claim its output slots. `Err`
+    /// carries the refusal; the caller then dispatches nothing.
+    fn claim(&self, kind: &'static str, writes: &Writes, batch: &[Pending]) -> Result<(), String> {
+        let mut st = self.0.lock().unwrap();
+        if st.open == 0 {
+            st.claimed.iter_mut().for_each(|(_, c)| c.clear());
+            st.refused = None;
+        }
+        st.open += 1;
+        if let Some(why) = &st.refused {
+            return Err(why.clone());
+        }
+        let LedgerState {
+            claimed, refused, ..
+        } = &mut *st;
+        let mut clash = None;
+        'rows: for (MessageInput { payload, .. }, _) in batch {
+            let MessagePayload::Rows { rows } = payload;
+            for row in rows.iter() {
+                let walked = writes.each(&row.read(), |c, slot| {
+                    if clash.is_some() {
+                        return;
+                    }
+                    let id = (c.id)();
+                    let at = match claimed.iter().position(|(t, _)| *t == id) {
+                        Some(at) => at,
+                        None => {
+                            claimed.push((id, Claimed::default()));
+                            claimed.len() - 1
+                        }
+                    };
+                    if !claimed[at].1.claim(slot) {
+                        clash = Some(format!(
+                            "flush refused: slot {slot} of world storage {} has a second \
+                             writer in this batch (found by {kind}); no two invocations of \
+                             one flush may write the same slot",
+                            (c.name)()
+                        ));
+                    }
+                });
+                if let Err(why) = walked {
+                    clash.get_or_insert(why);
+                }
+                if clash.is_some() {
+                    break 'rows;
+                }
+            }
+        }
+        match clash {
+            Some(why) => {
+                *refused = Some(why.clone());
+                Err(why)
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// Close the kind's part of the flush; the refusal, if the flush was refused.
+    fn close(&self) -> Option<String> {
+        let mut st = self.0.lock().unwrap();
+        st.open -= 1;
+        st.refused.clone()
+    }
+}
+
 pub(super) trait ShaderSetup: Sync + Send {
     fn storages(&self) -> &Vec<TypeId>;
     /// Fill the batch table and bind the pipeline; return how many INVOCATIONS the
@@ -268,6 +468,9 @@ macro_rules! plain_shader {
             world: Arc<World>,
             bound: Mutex<Bound>,
             pipeline: Arc<ComputePipeline>,
+            /// The output slots of a row, for the one-writer check.
+            writes: Writes,
+            ledger: Arc<Ledger>,
         }
 
         // The host scans `n_fatals` slots of the reflected `Fatals`, so the count
@@ -381,7 +584,7 @@ macro_rules! plain_shader {
                 (Bound { set, generations }, storages)
             }
 
-            pub(super) fn new(w: &Arc<World>) -> Self {
+            pub(super) fn new(w: &Arc<World>, writes: Writes, ledger: Arc<Ledger>) -> Self {
                 let g = w.gpu();
                 let shader_batch_size = g.gpu_in_flight();
                 let shader = $module::load(g.device().clone()).unwrap();
@@ -389,6 +592,16 @@ macro_rules! plain_shader {
                 let incidence = g.allocate_buffer::<$module::Incidence>(shader_batch_size);
                 let fatals = g.allocate_buffer::<$module::Fatals>(shader_batch_size);
                 let (bound, storages) = Self::bind(w, &pipeline, &fatals, &incidence);
+                // An output the kernel does not bind is a layout table out of
+                // step with the kernel: the check would guard the wrong storage.
+                for c in writes.cols {
+                    assert!(
+                        storages.contains(&(c.id)()),
+                        "{}: output storage {} is not bound",
+                        std::any::type_name::<Self>(),
+                        (c.name)()
+                    );
+                }
                 $name {
 		    storages,
 		    n_fatals: $n_fatals,
@@ -397,6 +610,8 @@ macro_rules! plain_shader {
                     world: w.clone(),
                     bound: Mutex::new(bound),
                     pipeline,
+                    writes,
+                    ledger,
                 }
             }
         }
@@ -430,6 +645,15 @@ macro_rules! plain_shader {
                     Option<oneshot::Sender<Result<(), EvalError>>>,
                 )],
             ) -> Result<u32, EvalError> {
+                // Before anything is recorded: a refused kind binds nothing and
+                // dispatches nothing, and `check` fails its messages.
+                if self
+                    .ledger
+                    .claim(std::any::type_name::<Self>(), &self.writes, batch)
+                    .is_err()
+                {
+                    return Ok(0);
+                }
                 let total: usize = batch
                     .iter()
                     .map(|(MessageInput { payload, .. }, _)| {
@@ -462,8 +686,24 @@ macro_rules! plain_shader {
                     Option<oneshot::Sender<Result<(), EvalError>>>,
                 )>,
             ) -> Vec<MessageInput> {
-                let fatals = self.fatals.read().unwrap();
+                let refused = self.ledger.close();
                 let mut retired = Vec::with_capacity(batch.len());
+                // A refused flush ran nothing of this kind (or ran it beside a
+                // refused one): every message fails, and the fatal table holds a
+                // previous flush's marks, so it is not read.
+                if let Some(why) = refused {
+                    for (input, respond_to) in batch.drain(..) {
+                        if let Some(respond_to) = respond_to {
+                            let _b = respond_to.send(Err(EvalError::Backend {
+                                shader: std::any::type_name::<Self>(),
+                                msg: why.clone(),
+                            }));
+                        }
+                        retired.push(input);
+                    }
+                    return retired;
+                }
+                let fatals = self.fatals.read().unwrap();
                 // A storage that grew after `setup` bound it was reallocated
                 // between recording and submit, so the kernel ran on the old copy:
                 // its inputs may be stale and its outputs did not reach the live
@@ -533,7 +773,8 @@ macro_rules! define_shaders {
             $fname:ident,
             $eval:ident,
 	    $n_fatals:expr,
-            [ $($ty:ty),* ]
+            [ $($ty:ty),* ],
+            $writes:expr
         );* $(;)?
     ) => {
         {
@@ -544,8 +785,9 @@ macro_rules! define_shaders {
 
             // 2. Build the runtime HashMap.
             let mut __shaders: HashMap<MessageKind, Box<dyn ShaderSetup>> = HashMap::new();
+            let __ledger = Arc::new(Ledger::default());
             $(
-                define_shaders!(@insert $mode, $name, $eval, __shaders, $w);
+                define_shaders!(@insert $mode, $name, $eval, __shaders, $w, $writes, __ledger);
             )*
             __shaders
         }
@@ -559,40 +801,44 @@ macro_rules! define_shaders {
 
 
 
-    (@insert row, $name:ident, $eval:ident, $shaders:ident, $w:expr) => {
-        $shaders.insert(MessageKind::$eval, Box::new($name::new($w)));
+    (@insert row, $name:ident, $eval:ident, $shaders:ident, $w:expr, $writes:expr, $ledger:ident) => {
+        $shaders.insert(
+            MessageKind::$eval,
+            Box::new($name::new($w, $writes, $ledger.clone())),
+        );
     };
 }
 
 pub(super) fn all_shaders(w: &Arc<World>) -> HashMap<MessageKind, Box<dyn ShaderSetup>> {
     define_shaders!(
         &w;   // <-- pass your context reference here once
-        @row     SimpleSum, shader_simple_sum, EvalSimpleSum, fatal_width::<shader_simple_sum::Fatals>(), [[u32; 128], f32];
-        @row     CriticallyDampedWarpedPlain, critically_damped_warped_plain, EvalCriticallyDampedWarpedPlain, fatal_counts::CRITICALLY_DAMPED_WARPED_PLAIN, [[u32; 128], f32, Twist<f32>, Motor<f32>, [Wrench<f32>; 2]];
-        @row     CriticallyDampedWarpedJacobian, critically_damped_warped_jacobian, EvalCriticallyDampedWarpedJacobian, fatal_counts::CRITICALLY_DAMPED_WARPED_JACOBIAN, [[u32; 128], f32, Twist<f32>, Motor<f32>, [[Wrench<f32>; 24]; 2], [Wrench<f32>; 2]];
-        @row     PerpendicularDamperWarpedPlain, perpendicular_damper_warped_plain, EvalPerpendicularDamperWarpedPlain, fatal_counts::PERPENDICULAR_DAMPER_WARPED_PLAIN, [[u32; 128], f32, Twist<f32>, Motor<f32>, [Wrench<f32>; 2]];
-        @row     PerpendicularDamperWarpedJacobian, perpendicular_damper_warped_jacobian, EvalPerpendicularDamperWarpedJacobian, fatal_counts::PERPENDICULAR_DAMPER_WARPED_JACOBIAN, [[u32; 128], f32, Twist<f32>, Motor<f32>, [[Wrench<f32>; 24]; 2], [Wrench<f32>; 2]];
-        @row     SimpleSpringDamperPlain, simple_spring_damper_plain, EvalSimpleSpringDamperPlain, fatal_counts::SIMPLE_SPRING_DAMPER_PLAIN, [[u32; 128], f32, Twist<f32>, Motor<f32>, [Wrench<f32>; 2]];
-        @row     SimpleSpringDamperJacobian, simple_spring_damper_jacobian, EvalSimpleSpringDamperJacobian, fatal_counts::SIMPLE_SPRING_DAMPER_JACOBIAN, [[u32; 128], f32, Twist<f32>, Motor<f32>, [[Wrench<f32>; 24]; 2], [Wrench<f32>; 2]];
-        @row     TorsionalDamperWarpedPlain, torsional_damper_warped_plain, EvalTorsionalDamperWarpedPlain, fatal_counts::TORSIONAL_DAMPER_WARPED_PLAIN, [[u32; 128], f32, Twist<f32>, Motor<f32>, [Wrench<f32>; 2]];
-        @row     TorsionalDamperWarpedJacobian, torsional_damper_warped_jacobian, EvalTorsionalDamperWarpedJacobian, fatal_counts::TORSIONAL_DAMPER_WARPED_JACOBIAN, [[u32; 128], f32, Twist<f32>, Motor<f32>, [[Wrench<f32>; 24]; 2], [Wrench<f32>; 2]];
-        @row Pre, pre_shader, Pre, fatal_counts::PRE, [[u32; 128], f32, Twist<f32>, Motor<f32>];
+        @row     SimpleSum, shader_simple_sum, EvalSimpleSum, fatal_width::<shader_simple_sum::Fatals>(), [[u32; 128], f32], writes!(2 => f32);
+        @row     CriticallyDampedWarpedPlain, critically_damped_warped_plain, EvalCriticallyDampedWarpedPlain, fatal_counts::CRITICALLY_DAMPED_WARPED_PLAIN, [[u32; 128], f32, Twist<f32>, Motor<f32>, [Wrench<f32>; 2]], writes!(4 => [Wrench<f32>; 2]);
+        @row     CriticallyDampedWarpedJacobian, critically_damped_warped_jacobian, EvalCriticallyDampedWarpedJacobian, fatal_counts::CRITICALLY_DAMPED_WARPED_JACOBIAN, [[u32; 128], f32, Twist<f32>, Motor<f32>, [[Wrench<f32>; 24]; 2], [Wrench<f32>; 2]], writes!(4 => [[Wrench<f32>; 24]; 2], 5 => [Wrench<f32>; 2]);
+        @row     PerpendicularDamperWarpedPlain, perpendicular_damper_warped_plain, EvalPerpendicularDamperWarpedPlain, fatal_counts::PERPENDICULAR_DAMPER_WARPED_PLAIN, [[u32; 128], f32, Twist<f32>, Motor<f32>, [Wrench<f32>; 2]], writes!(4 => [Wrench<f32>; 2]);
+        @row     PerpendicularDamperWarpedJacobian, perpendicular_damper_warped_jacobian, EvalPerpendicularDamperWarpedJacobian, fatal_counts::PERPENDICULAR_DAMPER_WARPED_JACOBIAN, [[u32; 128], f32, Twist<f32>, Motor<f32>, [[Wrench<f32>; 24]; 2], [Wrench<f32>; 2]], writes!(4 => [[Wrench<f32>; 24]; 2], 5 => [Wrench<f32>; 2]);
+        @row     SimpleSpringDamperPlain, simple_spring_damper_plain, EvalSimpleSpringDamperPlain, fatal_counts::SIMPLE_SPRING_DAMPER_PLAIN, [[u32; 128], f32, Twist<f32>, Motor<f32>, [Wrench<f32>; 2]], writes!(4 => [Wrench<f32>; 2]);
+        @row     SimpleSpringDamperJacobian, simple_spring_damper_jacobian, EvalSimpleSpringDamperJacobian, fatal_counts::SIMPLE_SPRING_DAMPER_JACOBIAN, [[u32; 128], f32, Twist<f32>, Motor<f32>, [[Wrench<f32>; 24]; 2], [Wrench<f32>; 2]], writes!(4 => [[Wrench<f32>; 24]; 2], 5 => [Wrench<f32>; 2]);
+        @row     TorsionalDamperWarpedPlain, torsional_damper_warped_plain, EvalTorsionalDamperWarpedPlain, fatal_counts::TORSIONAL_DAMPER_WARPED_PLAIN, [[u32; 128], f32, Twist<f32>, Motor<f32>, [Wrench<f32>; 2]], writes!(4 => [Wrench<f32>; 2]);
+        @row     TorsionalDamperWarpedJacobian, torsional_damper_warped_jacobian, EvalTorsionalDamperWarpedJacobian, fatal_counts::TORSIONAL_DAMPER_WARPED_JACOBIAN, [[u32; 128], f32, Twist<f32>, Motor<f32>, [[Wrench<f32>; 24]; 2], [Wrench<f32>; 2]], writes!(4 => [[Wrench<f32>; 24]; 2], 5 => [Wrench<f32>; 2]);
+        @row Pre, pre_shader, Pre, fatal_counts::PRE, [[u32; 128], f32, Twist<f32>, Motor<f32>], writes!(2 => Motor<f32>, 3 => Twist<f32>);
         // ROW-driven stages: binding 2 is ALWAYS the row storage, the rest follow.
-        @row Gather, gather_shader, Gather, fatal_counts::GATHER, [[u32; 128], Wrench<f32>, [Wrench<f32>; 2]];
-        @row BlockMatVec, block_matvec_shader, BlockMatVec, fatal_counts::BLOCK_MAT_VEC, [[u32; 128], [[f32; 6]; 6], Wrench<f32>, Twist<f32>];
-        @row Gemm, gemm_shader, Gemm, fatal_counts::GEMM, [[u32; 128], [[f32; 6]; 6]];
-        @row AssembleBlock, assemble_shader, AssembleBlock, fatal_counts::ASSEMBLE_BLOCK, [[u32; 128], f32, [[f32; 6]; 6], [[Wrench<f32>; 24]; 2]];
-        @row BlockReduce, block_reduce_shader, BlockReduce, fatal_counts::BLOCK_REDUCE, [[u32; 128], [[f32; 6]; 6], f32];
-        @row BlockCopy, block_copy_shader, BlockCopy, fatal_counts::BLOCK_COPY, [[u32; 128], [[f32; 6]; 6]];
-        @row BodyPostDiagonal, body_post_diagonal_shader, BodyPostDiagonal, fatal_counts::BODY_POST_DIAGONAL, [[u32; 128], Motor<f32>, Twist<f32>, Wrench<f32>, [[f32; 6]; 6], [f32; 3], f32];
-        @row BodyPostFull, body_post_full_shader, BodyPostFull, fatal_counts::BODY_POST_FULL, [[u32; 128], Motor<f32>, Twist<f32>, Wrench<f32>, [[f32; 6]; 6], [[f32; 3]; 3], f32];
-        @row BodyPostGatheredDiagonal, body_post_gathered_diagonal_shader, BodyPostGatheredDiagonal, fatal_counts::BODY_POST_GATHERED_DIAGONAL, [[u32; 128], Motor<f32>, Twist<f32>, Wrench<f32>, [[f32; 6]; 6], [f32; 3], f32, [Wrench<f32>; 2]];
-        @row BodyPostGatheredFull, body_post_gathered_full_shader, BodyPostGatheredFull, fatal_counts::BODY_POST_GATHERED_FULL, [[u32; 128], Motor<f32>, Twist<f32>, Wrench<f32>, [[f32; 6]; 6], [[f32; 3]; 3], f32, [Wrench<f32>; 2]]
+        @row Gather, gather_shader, Gather, fatal_counts::GATHER, [[u32; 128], Wrench<f32>, [Wrench<f32>; 2]], writes!(0 => Wrench<f32>);
+        @row BlockMatVec, block_matvec_shader, BlockMatVec, fatal_counts::BLOCK_MAT_VEC, [[u32; 128], [[f32; 6]; 6], Wrench<f32>, Twist<f32>], writes!(0 => Twist<f32>);
+        @row Gemm, gemm_shader, Gemm, fatal_counts::GEMM, [[u32; 128], [[f32; 6]; 6]], writes!(0 => [[f32; 6]; 6]);
+        @row AssembleBlock, assemble_shader, AssembleBlock, fatal_counts::ASSEMBLE_BLOCK, [[u32; 128], f32, [[f32; 6]; 6], [[Wrench<f32>; 24]; 2]], writes!(0 => [[f32; 6]; 6]);
+        @row BlockReduce, block_reduce_shader, BlockReduce, fatal_counts::BLOCK_REDUCE, [[u32; 128], [[f32; 6]; 6], f32], writes!(0 => f32);
+        @row BlockCopy, block_copy_shader, BlockCopy, fatal_counts::BLOCK_COPY, [[u32; 128], [[f32; 6]; 6]], writes!(0 => [[f32; 6]; 6]);
+        @row BodyPostDiagonal, body_post_diagonal_shader, BodyPostDiagonal, fatal_counts::BODY_POST_DIAGONAL, [[u32; 128], Motor<f32>, Twist<f32>, Wrench<f32>, [[f32; 6]; 6], [f32; 3], f32], writes!(per 0, 3, 9; 6 => [[f32; 6]; 6], 7 => Wrench<f32>, 8 => Wrench<f32>);
+        @row BodyPostFull, body_post_full_shader, BodyPostFull, fatal_counts::BODY_POST_FULL, [[u32; 128], Motor<f32>, Twist<f32>, Wrench<f32>, [[f32; 6]; 6], [[f32; 3]; 3], f32], writes!(per 0, 3, 9; 6 => [[f32; 6]; 6], 7 => Wrench<f32>, 8 => Wrench<f32>);
+        @row BodyPostGatheredDiagonal, body_post_gathered_diagonal_shader, BodyPostGatheredDiagonal, fatal_counts::BODY_POST_GATHERED_DIAGONAL, [[u32; 128], Motor<f32>, Twist<f32>, Wrench<f32>, [[f32; 6]; 6], [f32; 3], f32, [Wrench<f32>; 2]], writes!(8 => [[f32; 6]; 6], 9 => Wrench<f32>, 10 => Wrench<f32>);
+        @row BodyPostGatheredFull, body_post_gathered_full_shader, BodyPostGatheredFull, fatal_counts::BODY_POST_GATHERED_FULL, [[u32; 128], Motor<f32>, Twist<f32>, Wrench<f32>, [[f32; 6]; 6], [[f32; 3]; 3], f32, [Wrench<f32>; 2]], writes!(8 => [[f32; 6]; 6], 9 => Wrench<f32>, 10 => Wrench<f32>)
     )
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::row::ROW;
     use super::super::rows::fixed::{JointRow, bake_joints};
     use super::super::{
         MessageInput, MessageKind, MessagePayload, Pending, PendingByKind, Shaders,
@@ -774,6 +1020,167 @@ mod tests {
     #[test]
     fn jacobian_kernel_fatal_fails_only_its_own_message() {
         fatal_fails_only_its_own_message(MessageKind::EvalSimpleSpringDamperJacobian, true);
+    }
+
+    // ── One writer per slot (AR-0102) ────────────────────────────────────────
+
+    /// Sentinel the output slots start at, so a test can see that nothing ran.
+    const FRESH: f32 = -7.0;
+
+    fn bare_shaders(world: &Arc<World>) -> Shaders {
+        let g = world.gpu();
+        Shaders {
+            shaders: all_shaders(world),
+            cmd_allocator: g.cmd_allocator().clone(),
+            gpu: g.clone(),
+            world: world.clone(),
+        }
+    }
+
+    /// One message of `kind` over raw rows.
+    fn raw_message(
+        world: &Arc<World>,
+        kind: MessageKind,
+        rows: &[Row],
+    ) -> (Pending, oneshot::Receiver<Result<(), EvalError>>) {
+        let keys: Vec<WorldKey<Row>> = {
+            let mut map = world.write::<Row>();
+            rows.iter().map(|r| map.add(*r)).collect()
+        };
+        let (tx, rx) = oneshot::channel();
+        let input = MessageInput {
+            kind,
+            payload: MessagePayload::Rows {
+                rows: Arc::from(keys),
+            },
+        };
+        ((input, Some(tx)), rx)
+    }
+
+    /// A `simple_sum` row: `out = a + b`.
+    fn sum_row(a: &WorldKey<f32>, b: &WorldKey<f32>, out: &WorldKey<f32>) -> Row {
+        let mut r: Row = [0; ROW];
+        r[0] = a.raw_index() as u32;
+        r[1] = b.raw_index() as u32;
+        r[2] = out.raw_index() as u32;
+        r
+    }
+
+    fn outcome(mut rx: oneshot::Receiver<Result<(), EvalError>>) -> Result<(), EvalError> {
+        rx.try_recv()
+            .expect("sender dropped without an outcome")
+            .expect("check reported no outcome")
+    }
+
+    fn assert_refused(o: Result<(), EvalError>) {
+        match o {
+            Err(EvalError::Backend { msg, .. }) => assert!(
+                msg.contains("second writer"),
+                "refused for the wrong reason: {msg}"
+            ),
+            other => panic!("a colliding flush was not refused: {other:?}"),
+        }
+    }
+
+    fn scalars(world: &Arc<World>, values: &[f32]) -> Vec<WorldKey<f32>> {
+        let mut map = world.write::<f32>();
+        values.iter().map(|v| map.add(*v)).collect()
+    }
+
+    /// Two messages of one kind write the same slot, a third writes its own:
+    /// the whole flush is refused, every caller gets `EvalError::Backend`, and
+    /// no output slot moved — not even the innocent one — because nothing ran.
+    #[test]
+    fn two_writers_of_one_slot_refuse_the_flush() {
+        let world = Arc::new(World::builder().usual::<f32>());
+        let shaders = bare_shaders(&world);
+        let k = scalars(&world, &[1.0, 2.0, 3.0, 4.0, FRESH, FRESH]);
+        let (shared, own) = (&k[4], &k[5]);
+        let kind = MessageKind::EvalSimpleSum;
+        let (m0, rx0) = raw_message(&world, kind, &[sum_row(&k[0], &k[1], shared)]);
+        let (m1, rx1) = raw_message(&world, kind, &[sum_row(&k[2], &k[3], shared)]);
+        let (m2, rx2) = raw_message(&world, kind, &[sum_row(&k[0], &k[3], own)]);
+        let mut batches: PendingByKind = HashMap::new();
+        batches.insert(kind, vec![m0, m1, m2]);
+        shaders.dispatch(&mut batches).unwrap();
+
+        for rx in [rx0, rx1, rx2] {
+            assert_refused(outcome(rx));
+        }
+        assert_eq!(shared.read(), FRESH, "the contested slot was written");
+        assert_eq!(own.read(), FRESH, "a refused flush still dispatched");
+    }
+
+    /// The collision inside ONE message: the same row twice in a round.
+    #[test]
+    fn a_row_repeated_within_a_round_is_refused() {
+        let world = Arc::new(World::builder().usual::<f32>());
+        let shaders = bare_shaders(&world);
+        let k = scalars(&world, &[1.0, 2.0, FRESH]);
+        let row = sum_row(&k[0], &k[1], &k[2]);
+        let kind = MessageKind::EvalSimpleSum;
+        let (m, rx) = raw_message(&world, kind, &[row, row]);
+        let mut batches: PendingByKind = HashMap::new();
+        batches.insert(kind, vec![m]);
+        shaders.dispatch(&mut batches).unwrap();
+
+        assert_refused(outcome(rx));
+        assert_eq!(k[2].read(), FRESH);
+    }
+
+    /// Two KINDS write one slot in one flush — `simple_sum`'s `out` and a
+    /// `BlockReduce` partial over the same scalar storage. Both callers are
+    /// refused, and the slot holds at most one writer's value.
+    #[test]
+    fn two_writers_across_kinds_refuse_the_flush() {
+        let world = Arc::new(World::builder().usual::<f32>());
+        let shaders = bare_shaders(&world);
+        let k = scalars(&world, &[1.0, 2.0, FRESH]);
+        let (m0, rx0) = raw_message(
+            &world,
+            MessageKind::EvalSimpleSum,
+            &[sum_row(&k[0], &k[1], &k[2])],
+        );
+        // An empty reduction: `out` ← 0.
+        let mut reduce: Row = [0; ROW];
+        reduce[0] = k[2].raw_index() as u32;
+        let (m1, rx1) = raw_message(&world, MessageKind::BlockReduce, &[reduce]);
+        let mut batches: PendingByKind = HashMap::new();
+        batches.insert(MessageKind::EvalSimpleSum, vec![m0]);
+        batches.insert(MessageKind::BlockReduce, vec![m1]);
+        shaders.dispatch(&mut batches).unwrap();
+
+        assert_refused(outcome(rx0));
+        assert_refused(outcome(rx1));
+        let v = k[2].read();
+        assert!([FRESH, 3.0, 0.0].contains(&v), "slot holds {v}");
+    }
+
+    /// Negative case: the check is per FLUSH. The same slot written by one row
+    /// in each of two consecutive flushes is two writers in sequence, not a
+    /// collision — and a refused flush does not poison the next one.
+    #[test]
+    fn one_writer_per_flush_is_not_a_collision() {
+        let world = Arc::new(World::builder().usual::<f32>());
+        let shaders = bare_shaders(&world);
+        let k = scalars(&world, &[1.0, 2.0, 5.0, FRESH]);
+        let kind = MessageKind::EvalSimpleSum;
+
+        // A refused flush first.
+        let row = sum_row(&k[0], &k[1], &k[3]);
+        let (m, rx) = raw_message(&world, kind, &[row, row]);
+        let mut batches: PendingByKind = HashMap::new();
+        batches.insert(kind, vec![m]);
+        shaders.dispatch(&mut batches).unwrap();
+        assert_refused(outcome(rx));
+
+        for (a, want) in [(&k[0], 3.0), (&k[2], 7.0)] {
+            let (m, rx) = raw_message(&world, kind, &[sum_row(a, &k[1], &k[3])]);
+            batches.insert(kind, vec![m]);
+            shaders.dispatch(&mut batches).unwrap();
+            outcome(rx).unwrap();
+            assert_eq!(k[3].read(), want);
+        }
     }
 
     /// A kernel whose storages grew after its descriptor set was written reads

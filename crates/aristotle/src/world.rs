@@ -66,25 +66,30 @@ struct MapKey<T: Pod> {
 
 struct RawMap {
     // Flat payload storage: a type-erased `Subbuffer<[T]>` of `capacity`
-    // elements in host-visible device memory, written through a shared reference.
+    // elements in host-visible device memory.
     //
-    // Writing through `&self` is the lock split from ACCELERATOR.md Part III, not a
-    // weakening of `write()`. There is exactly one hazard in this storage and it is
-    // STRUCTURAL: a reallocation (`grow`) or slot reuse changes what the indices
-    // the accelerator holds point at. Growth copies every slot to the same
-    // position, so indices survive it; what does NOT survive is the buffer handle,
-    // which is why growth bumps `generation`. The ELEMENTS themselves create no
-    // races as long as each slot has at most one writer. Hence:
-    //   * write guard = structural mutation (insert/grow, free-list), rare,
-    //                   a barrier that waits for everyone in flight;
-    //   * read guard  = "structure is stable" — under it one may read AND write
-    //                   ONE'S OWN elements, which is what batch tasks do in parallel.
+    // The STRUCTURAL hazard is a reallocation (`grow`) or slot reuse changing what
+    // the indices the accelerator holds point at. Growth copies every slot to the
+    // same position, so indices survive it; what does NOT survive is the buffer
+    // handle, which is why growth bumps `generation`. Structural mutation takes
+    // `&mut self`, i.e. this map's write guard.
     //
-    // The external API (`WorldKey::read`/`write`) does not change: it
-    // still takes an exclusive lock and is safe under arbitrary concurrency.
-    // The accelerator's write-back is a separate door — the device writing slots
-    // of a bound buffer in place — and its license is not "it's faster" but the
-    // invariant "≤1 writer per slot" (Part III).
+    // There are two doors to the elements, and they are not merged:
+    //   * the HOST door, `WorldKey::read`/`write`: `read_at`/`write_at` below,
+    //     through the cached mapping or the guarded `Subbuffer` accessors. A
+    //     read takes this map's read guard, a write its WRITE guard, so host
+    //     writes are serialized against every other host access and are safe
+    //     under arbitrary concurrency;
+    //   * the DEVICE door: a descriptor set binds this `Subbuffer` itself
+    //     (`ReadView::get_map`), and the kernels of one flush read and write its
+    //     slots in place. `Shaders::dispatch` holds `World::write_guard` on every
+    //     storage it binds from submit to fence, so the host door is shut while
+    //     the device is in, and a `grow` cannot swap the buffer under it.
+    // What the guard cannot order is the device against ITSELF: invocations of
+    // one flush run unordered, so the door is sound only while each slot has at
+    // most one writer per flush (ACCELERATOR.md Part III). Newton checks that
+    // before submitting (`accelerator/shaders.rs`, `Ledger`) and refuses a
+    // flush whose rows name one output slot twice.
     values: Box<dyn AnyVec>,
     /// Elements `values` holds. Every slot in `map` is below it — `insert` grows
     /// the buffer before it hands out a slot past the end — and both access paths
@@ -216,6 +221,8 @@ impl RawMap {
     /// callers check that with.
     #[inline]
     unsafe fn at<T: Pod>(base: NonNull<u8>, position: usize) -> *mut T {
+        // SAFETY: the caller guarantees `position` is within the buffer `base`
+        // maps, so the offset stays inside that one allocation.
         unsafe { base.as_ptr().cast::<T>().add(position) }
     }
 
@@ -223,8 +230,8 @@ impl RawMap {
     /// `Any` check instead of a manual `type_id` + `debug_assert`: `expect` fires
     /// if a `T` other than the one stored in this map was requested.
     pub fn values<T: Pod>(&self) -> &Subbuffer<[T]> {
-        // SAFETY: called under the map's guard; `&self` rules out concurrent
-        // structural mutation (which requires `&mut self`).
+        // Reached under the map's guard; `&self` rules out a concurrent `grow`
+        // replacing the buffer (which requires `&mut self`).
         self.values
             .as_any()
             .downcast_ref::<Subbuffer<[T]>>()
@@ -262,10 +269,13 @@ impl RawMap {
         self.assert_type::<T>();
         self.assert_in_bounds(position);
         match self.base {
-            // SAFETY: `position` came from a live `MapKey<T>`, so it is in bounds
-            // and its slot holds a `T`; the mapping is coherent and aligned for
-            // `T` (checked in `new`); and this map's own discipline keeps the
-            // device off the storage while the host touches it.
+            // SAFETY: `assert_in_bounds` holds `position` below `capacity`, the
+            // length of the buffer `base` maps; `assert_type` makes `T` the type
+            // it was built for, and `host_base` only hands out a coherent mapping
+            // aligned for `T`. The caller holds this map's read or write guard,
+            // which `Shaders::dispatch`'s write guard excludes, so the device is
+            // not writing the storage meanwhile; a host writer would need the
+            // write guard too, so none runs concurrently either.
             Some(base) => unsafe { Self::at::<T>(base, position).read() },
             None => self.values::<T>().read().unwrap()[position],
         }
@@ -278,8 +288,10 @@ impl RawMap {
         self.assert_type::<T>();
         self.assert_in_bounds(position);
         match self.base {
-            // SAFETY: as `read_at`, plus the one-writer-per-slot invariant that
-            // licenses writing through a shared reference (ACCELERATOR.md III).
+            // SAFETY: bounds, type and mapping as in `read_at`. Every caller holds
+            // this map exclusively — `set` through a `WriteView`, `insert` through
+            // `&mut self` — so no other host access and no device access (which
+            // needs the write guard `dispatch` takes) overlaps this store.
             Some(base) => unsafe { Self::at::<T>(base, position).write(value) },
             None => self.values::<T>().write().unwrap()[position] = value,
         }
@@ -372,17 +384,17 @@ impl RawMap {
     }
 }
 
-// SAFETY: `RawMap` contains an `UnsafeCell` and is therefore not automatically `Sync`.
-// The invariant that restores it is the same one that licenses
-// `ReadView::parked_slice_mut`: structural mutations require the write guard and
-// are serialized, while parallel element access under the read guard is disjoint
-// by slot (ACCELERATOR.md Part III). The payload is `Pod`, i.e. it has no interior
-// pointers and no Drop, so a partially written element is impossible.
+// SAFETY: the one field that is not `Sync` is `base`, the raw pointer into the
+// host mapping of `values` (`NonNull` opts out of both auto traits); everything
+// else is `Sync` already. What `&RawMap` allows through `base` is `read_at` — a
+// plain read of a `Pod` slot, harmless in parallel — and `write_at`, whose every
+// caller holds the map exclusively (see there). Mutating `base` itself needs
+// `&mut self`. Shared access from several threads therefore never races a store.
 unsafe impl Sync for RawMap {}
 
-// SAFETY: the added field is a pointer to the buffer's host mapping, which lives
-// as long as the buffer this map owns and is not tied to the creating thread.
-// Everything else in `RawMap` was already `Send`.
+// SAFETY: `base` points into the host mapping of the buffer this map owns, which
+// lives as long as that buffer and is not tied to the creating thread; `grow`
+// replaces the two together. Everything else in `RawMap` is already `Send`.
 unsafe impl Send for RawMap {}
 
 struct WorldInner {
@@ -403,15 +415,12 @@ impl std::fmt::Debug for World {
 }
 
 pub struct ReadView<'a, T: Pod> {
-    // Field order = drop order: inner is dropped FIRST,
-    // before _outer, so that the inner map's guard does not outlive what it borrows from.
     inner: RwLockReadGuard<'a, RawMap>,
     _marker: PhantomData<T>,
 }
 
 impl<'a, T: Pod> ReadView<'a, T> {
     pub fn len(&self) -> usize {
-        // SAFETY: as above.
         self.inner.payload_len()
     }
 
@@ -467,8 +476,8 @@ impl<T: Pod + Send + Sync> WorldKey<T> {
         self.inner.world.clone()
     }
 
-    /// Position of the value in its type's dense vector — the address for batched
-    /// access through `ReadView::parked_slice_mut`.
+    /// Position of the value in its type's dense vector — the address a baked
+    /// accelerator row carries for the device to index the bound buffer with.
     ///
     /// There is no generation check here: the index is valid while the key is alive, and the key owns
     /// the slot (releases it in `Drop`). Batched access is obliged to hold
@@ -490,7 +499,6 @@ pub struct WriteGuard<'a> {
 
 impl<'a, T: Pod + Send + Sync> WriteView<'a, T> {
     pub fn len(&self) -> usize {
-        // SAFETY: as above.
         self.inner.payload_len()
     }
 
@@ -588,17 +596,15 @@ impl World {
     }
 
     pub fn read<'a, T: Pod>(&'a self) -> ReadView<'a, T> {
-        let raw: *const RwLock<RawMap> =
+        // A plain borrow: the map of storages is fixed once `build` returns, so
+        // the `RwLock` lives exactly as long as `self`.
+        let lock: &'a RwLock<RawMap> =
             self.inner.map.get(&TypeId::of::<T>()).unwrap_or_else(|| {
                 panic!(
                     "Cannot find a corresponding map in a world for {}",
                     std::any::type_name::<T>()
                 )
             });
-        // SAFETY: `outer` is held for the whole lifetime of the view and blocks any writer
-        // to WorldInner, so the HashMap does not rehash/reallocate and the RwLock<RawMap>
-        // at `raw` stays in place. `inner` is dropped before `_outer` (field order).
-        let lock: &'a RwLock<RawMap> = unsafe { &*raw };
         ReadView {
             inner: lock.read().unwrap(),
             _marker: PhantomData,
@@ -606,14 +612,13 @@ impl World {
     }
 
     pub fn write<'a, T: Pod>(self: &'a Arc<Self>) -> WriteView<'a, T> {
-        let raw: *const RwLock<RawMap> =
+        let lock: &'a RwLock<RawMap> =
             self.inner.map.get(&TypeId::of::<T>()).unwrap_or_else(|| {
                 panic!(
                     "Cannot find a corresponding map in a world for {}",
                     std::any::type_name::<T>()
                 )
             });
-        let lock: &'a RwLock<RawMap> = unsafe { &*raw };
         WriteView {
             inner: lock.write().unwrap(),
             world: self.clone(),
