@@ -8,7 +8,7 @@ use clifford::pga3::{Motor, Twist, Wrench};
 use futures::channel::oneshot;
 use std::any::TypeId;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use vulkano::{
     buffer::Subbuffer,
     command_buffer::{AutoCommandBufferBuilder, PrimaryAutoCommandBuffer},
@@ -198,6 +198,19 @@ pub(crate) fn t_to_f32<T: Pod + 'static>(x: T) -> f32 {
     }
 }
 
+/// A shader's descriptor set together with the generation of every world
+/// storage it binds, in `storages` order, as read when the set was written.
+///
+/// World storage is reallocated when it grows, and a set keeps the buffer it was
+/// written with alive — so a set over a grown map would silently compute on the
+/// old copy. `setup` compares these against `World::generation` and rewrites
+/// the set first; `check` compares them again, to catch a growth that slipped in
+/// after the set was bound.
+struct Bound {
+    set: Arc<DescriptorSet>,
+    generations: Vec<u64>,
+}
+
 pub(super) trait ShaderSetup: Sync + Send {
     fn storages(&self) -> &Vec<TypeId>;
     /// Fill the batch table and bind the pipeline; return how many INVOCATIONS the
@@ -245,14 +258,15 @@ macro_rules! plain_shader {
     // Shared skeleton: struct + backend + setup_dispatch + new. Bindings 0/1 are
     // fatals/incidence; the rest are `w.read::<$ty>()` maps, in order, from 2 up.
     (@common $name:ident, $module:ident, $n_fatals:expr, [$($ty:ty),* $(,)?]) => {
-        #[derive(Clone)]
         pub(super) struct $name {
 	    storages: Vec<TypeId>,
 	    n_fatals: usize,
             incidence: Subbuffer<[$module::Incidence]>,
             #[allow(dead_code)]
             fatals: Subbuffer<[$module::Fatals]>,
-            set: Arc<DescriptorSet>,
+            /// The world the bound storages live in, to rebind them after growth.
+            world: Arc<World>,
+            bound: Mutex<Bound>,
             pipeline: Arc<ComputePipeline>,
         }
 
@@ -284,7 +298,7 @@ macro_rules! plain_shader {
                         PipelineBindPoint::Compute,
                         self.pipeline.layout().clone(),
                         0,
-                        self.set.clone(),
+                        self.current_set(),
                     )
                     .map_err(Self::backend)?
                     .push_constants(
@@ -296,14 +310,43 @@ macro_rules! plain_shader {
                 Ok(())
             }
 
-            pub(super) fn new(w: &World) -> Self {
-                let g = w.gpu();
-                let shader_batch_size = g.gpu_in_flight();
-                let ds_allocator = g.ds_allocator();
-                let shader = $module::load(g.device().clone()).unwrap();
-                let pipeline = g.build_pipeline(&shader, "main");
-                let incidence = g.allocate_buffer::<$module::Incidence>(shader_batch_size);
-                let fatals = g.allocate_buffer::<$module::Fatals>(shader_batch_size);
+            /// The descriptor set over the CURRENT buffer of every bound
+            /// storage, rewritten first if any of them has grown since it was
+            /// written. Called while recording, before the dispatch takes its
+            /// guards, so the read guards `bind` takes cannot meet its own.
+            fn current_set(&self) -> Arc<DescriptorSet> {
+                let mut bound = self.bound.lock().unwrap();
+                if self.stale(&bound).is_some() {
+                    *bound = Self::bind(
+                        &self.world,
+                        &self.pipeline,
+                        &self.fatals,
+                        &self.incidence,
+                    )
+                    .0;
+                }
+                bound.set.clone()
+            }
+
+            /// The first bound storage whose generation moved since `bound`
+            /// was written, if any.
+            fn stale(&self, bound: &Bound) -> Option<TypeId> {
+                self.storages
+                    .iter()
+                    .zip(&bound.generations)
+                    .find(|(t, g)| self.world.generation(**t) != **g)
+                    .map(|(t, _)| *t)
+            }
+
+            /// Write a descriptor set over the current buffers. Each buffer and
+            /// its generation are read under the same read guard, so they agree.
+            fn bind(
+                w: &World,
+                pipeline: &Arc<ComputePipeline>,
+                fatals: &Subbuffer<[$module::Fatals]>,
+                incidence: &Subbuffer<[$module::Incidence]>,
+            ) -> (Bound, Vec<TypeId>) {
+                let ds_allocator = w.gpu().ds_allocator().clone();
                 // Bindings 0/1 are fatals/incidence by convention, the $ty list
                 // fills 2.. — but shaderc STRIPS any buffer a kernel never touches
                 // (e.g. `fatals` when the trace has no fatal leaf), so the pipeline
@@ -319,25 +362,40 @@ macro_rules! plain_shader {
                     writes.push(WriteDescriptorSet::buffer(1, incidence.clone()));
                 }
                 let mut binding = 2u32;
-		let mut storages = Vec::new();
+                let mut storages = Vec::new();
+                let mut generations = Vec::new();
                 $(
                     if has(binding) {
+                        let view = w.read::<$ty>();
                         writes.push(WriteDescriptorSet::buffer(
                             binding,
-                            w.read::<$ty>().get_map().clone(),
+                            view.get_map().clone(),
                         ));
-			storages.push(TypeId::of::<$ty>());
+                        generations.push(view.generation());
+                        storages.push(TypeId::of::<$ty>());
                     }
                     binding += 1;
                 )*
                 let _b = binding;
-                let set = DescriptorSet::new(ds_allocator.clone(), layout, writes, []).unwrap();
+                let set = DescriptorSet::new(ds_allocator, layout, writes, []).unwrap();
+                (Bound { set, generations }, storages)
+            }
+
+            pub(super) fn new(w: &Arc<World>) -> Self {
+                let g = w.gpu();
+                let shader_batch_size = g.gpu_in_flight();
+                let shader = $module::load(g.device().clone()).unwrap();
+                let pipeline = g.build_pipeline(&shader, "main");
+                let incidence = g.allocate_buffer::<$module::Incidence>(shader_batch_size);
+                let fatals = g.allocate_buffer::<$module::Fatals>(shader_batch_size);
+                let (bound, storages) = Self::bind(w, &pipeline, &fatals, &incidence);
                 $name {
 		    storages,
 		    n_fatals: $n_fatals,
                     incidence,
                     fatals,
-                    set,
+                    world: w.clone(),
+                    bound: Mutex::new(bound),
                     pipeline,
                 }
             }
@@ -406,6 +464,16 @@ macro_rules! plain_shader {
             ) -> Vec<MessageInput> {
                 let fatals = self.fatals.read().unwrap();
                 let mut retired = Vec::with_capacity(batch.len());
+                // A storage that grew after `setup` bound it was reallocated
+                // between recording and submit, so the kernel ran on the old copy:
+                // its inputs may be stale and its outputs did not reach the live
+                // buffer. Fail the batch rather than report garbage as success.
+                // Growth after the fence is reported too — harmless, but it
+                // cannot be told apart from here.
+                let grown = {
+                    let bound = self.bound.lock().unwrap();
+                    self.stale(&bound)
+                };
                 // Fatals stay per INVOCATION, so a message owns the span it filled
                 // and its outcome is the outcome of any row inside that span. Only
                 // the first `n_fatals` slots are the trace's; a slot past them is
@@ -428,14 +496,21 @@ macro_rules! plain_shader {
                         });
                     at += len;
                     if let Some(respond_to) = respond_to {
-                        let _b = respond_to.send(match fired {
-                            Some((row, slots)) => Err(EvalError::Backend {
+                        let _b = respond_to.send(match (grown, fired) {
+                            (Some(t), _) => Err(EvalError::Backend {
+                                shader: std::any::type_name::<Self>(),
+                                msg: format!(
+                                    "world storage {t:?} grew while this batch was in flight; \
+                                     the kernel ran on the old buffer"
+                                ),
+                            }),
+                            (None, Some((row, slots))) => Err(EvalError::Backend {
                                 shader: std::any::type_name::<Self>(),
                                 msg: format!(
                                     "fatal slot(s) {slots:?} set at row {row} of this message"
                                 ),
                             }),
-                            None => Ok(()),
+                            (None, None) => Ok(()),
                         });
                     }
                     retired.push(input);
@@ -489,7 +564,7 @@ macro_rules! define_shaders {
     };
 }
 
-pub(super) fn all_shaders(w: &World) -> HashMap<MessageKind, Box<dyn ShaderSetup>> {
+pub(super) fn all_shaders(w: &Arc<World>) -> HashMap<MessageKind, Box<dyn ShaderSetup>> {
     define_shaders!(
         &w;   // <-- pass your context reference here once
         @row     SimpleSum, shader_simple_sum, EvalSimpleSum, fatal_width::<shader_simple_sum::Fatals>(), [[u32; 128], f32];
@@ -699,5 +774,58 @@ mod tests {
     #[test]
     fn jacobian_kernel_fatal_fails_only_its_own_message() {
         fatal_fails_only_its_own_message(MessageKind::EvalSimpleSpringDamperJacobian, true);
+    }
+
+    /// A kernel whose storages grew after its descriptor set was written reads
+    /// and writes the GROWN buffers: `simple_sum` over scalar slots and rows
+    /// allocated past the initial capacity, after one dispatch bound the
+    /// original ones.
+    #[tokio::test]
+    async fn simple_sum_reaches_slots_past_initial_capacity() {
+        use super::super::{Accelerator, row::Row};
+        use futures::future::join_all;
+
+        const INITIAL: usize = 16;
+        let world = Arc::new(World::builder().capacity(INITIAL).usual::<f32>());
+        let accel = Accelerator::<f32>::builder(world.clone()).build();
+
+        // One dispatch on the initial buffers, so the set is bound before growth.
+        let (a, b, out) = {
+            let mut map = world.write::<f32>();
+            (map.add(1.0), map.add(2.0), map.add(0.0))
+        };
+        accel.simple_sum(&a, &b, &out).await.unwrap();
+        assert_eq!(out.read(), 3.0);
+        let scalars = world.generation(TypeId::of::<f32>());
+        let rows = world.generation(TypeId::of::<Row>());
+
+        let n = INITIAL * 8;
+        let sums: Vec<(WorldKey<f32>, WorldKey<f32>, WorldKey<f32>)> = {
+            let mut map = world.write::<f32>();
+            (0..n)
+                .map(|i| (map.add(i as f32), map.add(0.5 * i as f32), map.add(-1.0)))
+                .collect()
+        };
+        // Grow the row storage up front too, then free the slots: `simple_sum`
+        // bakes its row inline, and a reallocation while an earlier batch is in
+        // flight is the case `check` reports as an error rather than this one.
+        let spare: Vec<WorldKey<Row>> = {
+            let mut map = world.write::<Row>();
+            (0..n + 1).map(|_| map.add([0; 128])).collect()
+        };
+        drop(spare);
+        assert!(world.generation(TypeId::of::<f32>()) > scalars);
+        assert!(world.generation(TypeId::of::<Row>()) > rows);
+        assert!(sums.last().unwrap().2.raw_index() >= INITIAL * 4);
+
+        let futs = sums.iter().map(|s| accel.simple_sum(&s.0, &s.1, &s.2));
+        for r in join_all(futs).await {
+            r.unwrap();
+        }
+        for (i, s) in sums.iter().enumerate() {
+            assert_eq!(s.2.read(), 1.5 * i as f32, "slot {}", s.2.raw_index());
+        }
+        // The value written before growth was carried over.
+        assert_eq!(out.read(), 3.0);
     }
 }
