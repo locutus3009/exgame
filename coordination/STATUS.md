@@ -9,8 +9,8 @@
 
 | Status | Meaning | Count |
 | --- | --- | ---: |
-| **In progress** | Claimed work with a live lease | 1 |
-| **In review** | Submitted by its worker, awaiting a coordinator decision | 0 |
+| **In progress** | Claimed work with a live lease | 0 |
+| **In review** | Submitted by its worker, awaiting a coordinator decision | 1 |
 | **Open** | Dependency-ready and available to claim | 0 |
 | **Blocked** | Cannot proceed until its recorded blocker clears | 0 |
 | **Planned** | Defined work awaiting promotion or dependencies | 0 |
@@ -36,7 +36,7 @@ flowchart LR
         AR_0105["AR-0105 - Done"]:::status_done
         AR_0106["AR-0106 - Done"]:::status_done
         AR_0107["AR-0107 - Done"]:::status_done
-        AR_0108["AR-0108 - In progress"]:::status_in_progress
+        AR_0108["AR-0108 - In review"]:::status_in_review
     end
     AR_0101 --> AR_0102
     AR_0101 --> AR_0108
@@ -75,11 +75,11 @@ flowchart LR
 
 ## Complete AR inventory
 
-### In progress (1)
+### In review (1)
 
 | Priority | AR | Owner | Summary | Next action |
 | --- | --- | --- | --- | --- |
-| P1 | [AR-0108](tasks/AR-0108.md): Retire ACCELERATOR.md and repoint every reference | worker-ar0108 | With M1&#x27;s implementation done, delete ACCELERATOR.md. Move the one authoritative piece (kernel I/O layout) next to the code that defines it and repoint every doc, tool and source comment that cites it. | Claim after every other M1 AR is done; regenerate the reference list with git grep, since the implementation ARs will have moved lines. |
+| P1 | [AR-0108](tasks/AR-0108.md): Retire ACCELERATOR.md and repoint every reference | Submitted by worker-ar0108 | With M1&#x27;s implementation done, delete ACCELERATOR.md. Move the one authoritative piece (kernel I/O layout) next to the code that defines it and repoint every doc, tool and source comment that cites it. | Claim after every other M1 AR is done; regenerate the reference list with git grep, since the implementation ARs will have moved lines. |
 
 ### Done (7)
 
