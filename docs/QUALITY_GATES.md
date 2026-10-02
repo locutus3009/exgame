@@ -755,8 +755,8 @@ Specification, precise enough to implement without a judgement call:
    path that is a symlink. `AGENTS.md` is a symlink to `CLAUDE.md`; checking it separately would
    double-report every finding in it.
 2. **Governed documents.** Every tracked `.md` under `docs/architecture/` or `docs/process/`,
-   plus `ACCELERATOR.md` at the root. `ACCELERATOR.md` is governed and does **not** move: thirteen
-   in-source comments point at it by that path.
+   and nothing else. The root-level accelerator document that was once also governed here was
+   retired in M1 (AR-0108).
 3. **The index.** `docs/architecture/overview.md`, exactly one root.
 4. **Link extraction.** Per file, drop every line inside a fenced block (` ``` ` or `~~~`), then
    drop inline code spans from the remaining lines, then take inline links `[text](target)` and

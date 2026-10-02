@@ -8,7 +8,7 @@ use peano::prelude::*;
 use std::sync::Arc;
 
 /// Steps every mechanism of an epoch concurrently on ONE accelerator
-/// (ACCELERATOR.md Part II). Batch breadth comes from here: while one
+/// (the async dispatch model). Batch breadth comes from here: while one
 /// mechanism is parked on a dispatch, the others submit theirs, and the
 /// accelerator flushes once all of them are parked (quiescence) or a batch is
 /// full.

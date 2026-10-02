@@ -2,16 +2,16 @@
 
 > **Migrated design record.** This document was written under the previous
 > process and lived in `docs/superpowers/specs/`, which was deleted. It was kept
-> because [ACCELERATOR.md](../../../ACCELERATOR.md) cites it for the block-solver design and
+> because `ACCELERATOR` (the accelerator design document, retired in M1) cites it for the block-solver design and
 > its rejected alternatives. Its cold-start claim was refuted by measurement — see
 > [findings/2026-07-21-newton-schulz-convergence](../findings/2026-07-21-newton-schulz-convergence.md). It is history, not
 > obligation: its `Status:` line records what was true when it was written, and
-> where it disagrees with the code or with [ACCELERATOR.md](../../../ACCELERATOR.md),
+> where it disagrees with the code or with `ACCELERATOR` (the accelerator design document, retired in M1),
 > they win.
 
 Date: 2026-07-21
 Status: implemented (2026-07-21)
-Related: [`/ACCELERATOR.md`](../../../ACCELERATOR.md) (Parts I, III–V),
+Related: `/ACCELERATOR` (retired in M1) (Parts I, III–V),
 [`2026-07-19-accelerator-storage-contract-design.md`](2026-07-19-accelerator-storage-contract-design.md)
 
 ## Problem
@@ -246,7 +246,7 @@ here, per-message overhead is. Grouping changes only how work is carried: cells
 stay disjoint across messages and the reduction order inside a cell is unchanged,
 so neither the result nor its determinism moves. The `Σ_k` reduction is
 sequential *inside* one task, in fixed order, so determinism matches the gather
-stage (ACCELERATOR.md §6). Ordering exists only *between* GEMMs: two barriers per
+stage (ACCELERATOR §6; document retired in M1). Ordering exists only *between* GEMMs: two barriers per
 Newton–Schulz iteration.
 
 This is consistent with the current dispatch granularity, which already sends one

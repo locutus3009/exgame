@@ -38,7 +38,7 @@ INDEX = "docs/architecture/overview.md"
 # files that are governed. A governed document carries an obligation: it is
 # indexed, and the index entry is checked.
 GOVERNED_DIRS = ("docs/architecture/", "docs/process/")
-GOVERNED_FILES = ("ACCELERATOR.md",)
+GOVERNED_FILES: tuple[str, ...] = ()
 
 # Fenced code blocks are not prose; links inside them are examples.
 FENCE = re.compile(r"^\s*(```|~~~)")

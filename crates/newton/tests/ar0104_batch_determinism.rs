@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 //! Batch composition must change only timing, never physics
-//! (ACCELERATOR.md Part V, the determinism invariant).
+//! (the determinism invariant).
 //!
 //! The same chain is stepped on accelerators that pack its work differently: the
 //! default flush policy, a batch-size hint of ONE row (so every message goes out

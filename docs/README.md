@@ -35,7 +35,7 @@ Seven buckets, and the bucket is the claim:
   the numbers ruled out. Evidence, not decisions. One of the three exists because the
   measurement refuted the design it was checked against.
 - `records/` — three design specs migrated out of the deleted corpus because live source or
-  `ACCELERATOR.md` cites them. Their claim is deliberately the weakest here: a record is the
+  the accelerator design document (retired in M1) cited them. Their claim is deliberately the weakest here: a record is the
   spec a shipped piece of code was written to, not an obligation on it, and where it disagrees
   with the code it loses. The bucket is closed; nothing may be added to it.
 
@@ -54,22 +54,16 @@ where a task has an owner,
 a lease and recorded evidence — an identity outside the session that wrote it, which is exactly
 what the bookmark never had.
 
-### 2. `ACCELERATOR.md` — a living subsystem document (authoritative for its subsystem)
+### 2. The accelerator subsystem document — retired in M1
 
-The GPU accelerator: build-time GLSL codegen, async dispatch, write-back and locking, and the
-open questions. It is *living* — it is edited as the subsystem changes rather than written once
-— and it keeps two separate axes that most documents collapse into one: **design maturity**
-(settled / weakly worked out / not yet touched) marked inline, and **implementation state**
-(landed / placeholder / not wired) in its status section. Keeping them separate is why it is
-still accurate; a single "status" field would have hidden a settled design that nothing
-implements, and an implemented stage whose design was never worked out.
-
-It is authoritative for the accelerator, and it is the reason the accelerator survived being
-invisible from the crate table. It is indexed from
-[architecture/overview.md](architecture/overview.md#subsystem-documents) as a subsystem document
-of system 1, with both axes named there so a later editor does not collapse them. **It stays at
-the repository root**: thirteen in-source comments point at it by that path, and those
-back-references are the mechanism that kept it maintained while the abandoned corpus rotted.
+The GPU accelerator (build-time GLSL codegen, async dispatch, write-back and locking) used to
+have a living subsystem document at the repository root, `ACCELERATOR` in upper case. It was
+retired in M1 (AR-0108) once its open design had either been built — the per-flush writer
+check, the epoch freeze, storage growth, bounded submission — or explicitly dropped as out of
+scope. Nothing replaces it as a document: the authoritative kernel I/O layout is now the module
+doc of `crates/newton/build.rs`, the enforced invariants are summarized in
+[CLAUDE.md](../CLAUDE.md#the-accelerator), and the module docs of the accelerator and of
+`aristotle::world` describe the rest. Its full text remains in git history.
 
 ### 3. `docs/` — process and quality (authoritative for process)
 
@@ -112,7 +106,7 @@ ran at 0 of 1531 compliance for three months without anyone noticing, because no
 
 Tidying it would have produced a second corpus with the same missing mechanism. Six documents
 were migrated instead — the three `findings/` notes the governed documents link, and the three
-specs in `records/` that live source or `ACCELERATOR.md` cites — and the other 75 were deleted
+specs in `records/` that live source or the accelerator document (retired in M1) cited — and the other 75 were deleted
 in one commit whose message carries the numbers above.
 
 ### 6. `coordination/` — task state and the coordinator (authoritative for who is doing what)

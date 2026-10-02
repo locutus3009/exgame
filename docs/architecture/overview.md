@@ -71,14 +71,7 @@ is no GUI host at present.
 
 | Doc | Role |
 | --- | --- |
-| [ACCELERATOR.md](../../ACCELERATOR.md) | The GPU compute pipeline that evaluates joint force laws and their Jacobians: build-time GLSL codegen (`crates/newton/build.rs`), runtime dispatch (`crates/newton/src/accelerator/`), the Vulkan objects under it (`crates/rembrandt`) and the world storage they share (`crates/aristotle`). Authoritative for that subsystem. It stays at the repository root, where thirteen in-source comments already point at it (4 in `crates/aristotle/src/world.rs`, 6 in `crates/newton/build.rs`, 2 in `crates/newton/src/accelerator/mod.rs`, 1 in `crates/viete/tests/kernel_differential_oracle.rs`) — those back-references are the mechanism that kept it maintained, and moving the file would break them. |
-
-`ACCELERATOR.md` keeps two axes separate that most documents collapse into one:
-**design maturity** (`settled` / `weakly worked out` / `not yet touched`, marked
-inline) and **implementation state** (landed / placeholder / not wired, in its
-status section). Keep them separate when editing it. Collapsing them into a single
-"status" would hide both a settled design that nothing implements and an
-implemented stage whose design was never worked out, and both exist in it today.
+| *(none)* | The GPU compute pipeline (build-time GLSL codegen in `crates/newton/build.rs`, runtime dispatch in `crates/newton/src/accelerator/`, the Vulkan objects in `crates/rembrandt` and the world storage in `crates/aristotle`) had a root-level subsystem document until M1. It was retired by AR-0108 once its open design was built or dropped; no in-source comment points at it any more. The kernel I/O layout it held as authoritative is now the module doc of `crates/newton/build.rs`, and the enforced invariants are summarized in [CLAUDE.md](../../CLAUDE.md#the-accelerator). |
 
 ## DECIDED
 
@@ -149,20 +142,20 @@ file and the command that reproduces it where one exists.
 
 Design specs written under the previous process, kept when this system replaced
 it because something that survives cites them: a doc comment in live source, or
-[ACCELERATOR.md](../../ACCELERATOR.md). They are the only part of the abandoned
+the accelerator subsystem document (retired in M1). They are the only part of the abandoned
 `docs/superpowers/` corpus that was not deleted — three documents of seventy-eight.
 
 The bucket is the claim, and this bucket's claim is weak on purpose: **a record is
 the spec a shipped piece of code was written to, not an obligation on it.** Where a
-record disagrees with the code, with a `decided/` document, or with `ACCELERATOR.md`,
+record disagrees with the code, or with a `decided/` document,
 those win. Each carries that statement in its own header. Nothing may be added here;
 the bucket exists to hold what was cited, and it closes at three.
 
 | Doc | Cited by | For |
 | --- | --- | --- |
 | [records/2026-06-01-camera-spring-pga-echo](./records/2026-06-01-camera-spring-pga-echo-design.md) | `crates/joints/src/axial_spring_damper/critically_damped_warped.rs` | Relative-velocity damping and the λ-extrapolation that cancel the cascade drag-lag in the camera spring chain. |
-| [records/2026-07-19-accelerator-storage-contract](./records/2026-07-19-accelerator-storage-contract-design.md) | [ACCELERATOR.md](../../ACCELERATOR.md) | Why accelerator output lives in persistent, World-backed, domain-owned slots: the two aliasing bugs that produced the rule. |
-| [records/2026-07-21-newton-schulz-block-solver](./records/2026-07-21-newton-schulz-block-solver-design.md) | [ACCELERATOR.md](../../ACCELERATOR.md) | The block-solver design and the alternatives it rejected with numbers. Its cold-start claim is refuted by [findings/2026-07-21-newton-schulz-convergence](./findings/2026-07-21-newton-schulz-convergence.md). |
+| [records/2026-07-19-accelerator-storage-contract](./records/2026-07-19-accelerator-storage-contract-design.md) | the accelerator document (retired in M1) | Why accelerator output lives in persistent, World-backed, domain-owned slots: the two aliasing bugs that produced the rule. |
+| [records/2026-07-21-newton-schulz-block-solver](./records/2026-07-21-newton-schulz-block-solver-design.md) | the accelerator document (retired in M1) | The block-solver design and the alternatives it rejected with numbers. Its cold-start claim is refuted by [findings/2026-07-21-newton-schulz-convergence](./findings/2026-07-21-newton-schulz-convergence.md). |
 
 ## Governance
 

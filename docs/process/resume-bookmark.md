@@ -23,9 +23,10 @@ To resume design work:
 2. Pick a thread from [open/](../architecture/open/) — the live design questions
    — or from the queued areas in
    [design-review-method](./design-review-method.md).
-3. Read [ACCELERATOR.md](../../ACCELERATOR.md) before touching the accelerator.
-   It is the living document for the subsystem that absorbed most of the work
-   after the archive below was written.
+3. Read the "The accelerator" section of [CLAUDE.md](../../CLAUDE.md#the-accelerator)
+   and the module docs it names before touching the accelerator, the subsystem
+   that absorbed most of the work after the archive below was written. (Its
+   former living document was retired in M1.)
 
 ## Archive — design sessions to 2026-06-26
 
@@ -47,7 +48,7 @@ To resume design work:
 >   `docs/superpowers/` specs and plans it cites were deleted; all of them remain
 >   in git history.
 >
-> Where it disagrees with the code, with `CLAUDE.md`, with `ACCELERATOR.md` or
+> Where it disagrees with the code, with `CLAUDE.md` or
 > with a `decided/` document, they win.
 
 ### What just landed (as of 2026-06-26)

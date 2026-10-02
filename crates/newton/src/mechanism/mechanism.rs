@@ -20,12 +20,12 @@ use tokio::sync::{RwLock, RwLockWriteGuard};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StructureError {
     /// The mechanism (by id) is inside an epoch: its structure is frozen until
-    /// the epoch ends (ACCELERATOR.md Part II, the epoch invariant). Refused
+    /// the epoch ends (the epoch invariant). Refused
     /// rather than queued — retry between epochs.
     EpochInProgress(WorldId),
     /// The body (by world id) already belongs to a mechanism. A body has
     /// exactly one owner, which is what keeps every slot single-writer across
-    /// mechanisms (ACCELERATOR.md Part III).
+    /// mechanisms (checked per flush by the accelerator's `Ledger`).
     AlreadyOwned(WorldId),
     /// The mechanism (by id) runs on a different accelerator than the driver.
     ForeignAccelerator(WorldId),

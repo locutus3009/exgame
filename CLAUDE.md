@@ -77,10 +77,12 @@ are **gone**; there is no `jet` module, no `blade.rs`. The identifiers `Jet1`, `
 
 ## The accelerator
 
-The dominant work of the last quarter, and the thing least visible from the crate table. It is
-documented in **[ACCELERATOR.md](ACCELERATOR.md)**, a living subsystem document with separate
-maturity markers for the design and for the code. Read it before touching anything under
-`crates/newton/src/accelerator/`, `crates/newton/build.rs` or `crates/aristotle/src/world.rs`.
+The dominant work of the last quarter, and the thing least visible from the crate table. Its
+former design document, `ACCELERATOR`, was retired in M1 once its open design was either built
+or explicitly dropped; the code and its comments are now the description. The kernel I/O layout,
+which that document held as authoritative, is the module doc of `crates/newton/build.rs`. Read
+the module docs of `crates/newton/src/accelerator/mod.rs`, `shaders.rs` and
+`crates/aristotle/src/world.rs` before touching them.
 
 Three pieces:
 
@@ -102,11 +104,27 @@ Three pieces:
   in `melies`, and `#[tokio::test]` throughout. `#[async_trait]` is on `ForceField`, `Component`
   and `Example`, not on the accelerator, which is a concrete struct with inherent `async fn`s.
 
-**The open risk.** The world storage is sound only under an "at most one writer per slot"
-invariant (`crates/aristotle/src/world.rs:149`, `:196`, `:202`). It is guaranteed by construction
-and by the epoch discipline, documented in ACCELERATOR.md, and **not enforced** by anything.
-`crates/aristotle/src/` contains 17 uses of `unsafe` resting on it — 8 in `world.rs` and 9 in
-`epoch.rs`. Do not add a second writer path to a slot without reading ACCELERATOR.md part III.
+**The writer invariant, and what enforces it.** GPU kernels write world storage in place, and the
+invocations of one flush run unordered, so the storage is sound only while each slot has at most
+one writer per flush. Since M1 that is **enforced at runtime**, not merely assumed:
+
+- **The writer check.** Before recording anything, `Shaders::dispatch` runs the `Ledger` pre-pass
+  (`crates/newton/src/accelerator/shaders.rs`) over every row of every kind in the flush. A slot
+  claimed twice refuses the whole flush; every message in it fails with `EvalError::Backend` and
+  the worker keeps running.
+- **The epoch freeze.** `newton::Driver` steps all mechanisms of an epoch concurrently. Inside an
+  epoch a mechanism's structure is frozen: the `try_*` mutators return
+  `StructureError::EpochInProgress`, and a body already owned by one mechanism cannot join
+  another (`StructureError::AlreadyOwned`).
+- **Growth.** Per-type storage grows geometrically under the world's structural write guard, with
+  indices preserved and a per-type generation bumped; the accelerator rebinds its descriptor sets
+  when a generation changes. `Shaders::dispatch` holds `World::write_guard` on every storage it
+  binds from submit to fence, so the host cannot touch, or grow, a buffer the device is using.
+
+Host reads and writes (`World::read` / `World::write`) are safe functions. The `unsafe` in
+`crates/aristotle/src/` — 13 uses, 6 in `world.rs` and 7 in `epoch.rs` — each carries a
+`SAFETY` comment. The check is a runtime refusal, not a type: do not add a second writer path to
+a slot without extending the `Ledger`.
 
 ## Build, test, run
 
@@ -145,7 +163,8 @@ today. Do not describe a gate as running until it does.
   `decided/`, `open/`, `lessons/`, `planned/`, `crates/`, `findings/` and `records/` buckets and
   its governance rules. Its crate table now agrees with the one above; both were checked against
   `cargo metadata --no-deps`.
-- **Accelerator:** [ACCELERATOR.md](ACCELERATOR.md).
+- **Accelerator:** no separate document since M1; see "The accelerator" above and the module
+  docs it names.
 - **Coordination:** [coordination/README.md](coordination/README.md) — tasks, milestones and the
   `handoffctl` tool, in-tree since the project was published; the retired M0 series (AR-0001 to
   AR-0018, cited throughout `docs/`) is recorded in
