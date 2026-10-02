@@ -89,10 +89,14 @@ impl<T: Copy> EpochInner<T> {
     }
 }
 
-// SAFETY: dt is mutated only by the coordinator in the window between "all finished" and
-// the next phase-flip; workers read dt only after an Acquire-load of phase
-// (the phase flag is the Release/Acquire fence for the write to dt).
-unsafe impl<T: Copy + Send> Sync for EpochInner<T> {}
+// SAFETY: the two `UnsafeCell`s, `dt` and `warp`, are what keep this from being
+// `Sync` on its own. Both are written only by the coordinator (`enter`, and its
+// `Drop`), in the window between "every worker dropped its `Epoch`" and the next
+// Release flip of `phase`; a worker reads them only after an Acquire load has
+// seen that flip (`EpochHandle::enter`) and only through an `Epoch` it holds,
+// which the coordinator waits out before writing again. Reads may run on many
+// threads at once — `dt()` and `warp()` hand out `&T` — hence `T: Sync`.
+unsafe impl<T: Copy + Send + Sync> Sync for EpochInner<T> {}
 
 /// Adaptive busy-wait used inside the epoch hand-off loops. Each iteration
 /// emits a CPU spin-loop hint (cheap, SMT-friendly, low power); every 256
@@ -125,13 +129,20 @@ impl<T: Copy> EpochCoordinator<T> {
     pub fn enter(&self, dt: T, warp: T) {
         // SAFETY: between epochs — workers from the previous epoch have all
         // dropped their `Epoch<T>` (precondition: `wait()` returned), and now
-        // spin on `phase` without touching `dt`. The Release flip below
-        // publishes this write before any worker observes the new phase.
-        unsafe { *self.0.dt.get() = Some(dt) };
-        unsafe { *self.0.warp.get() = Some(warp) };
+        // spin on `phase` without touching `dt` or `warp`. The Release flip below
+        // publishes these writes before any worker observes the new phase.
+        unsafe {
+            *self.0.dt.get() = Some(dt);
+            *self.0.warp.get() = Some(warp);
+        }
 
-        unsafe { *self.1.0.dt.get() = Some(dt) };
-        unsafe { *self.1.0.warp.get() = Some(warp) };
+        // SAFETY: `self.1` is the coordinator's own broker epoch. Its `Arc` is
+        // never handed out — brokers borrow it only inside `wait`, below, on
+        // this same thread — so nothing else can be reading these cells.
+        unsafe {
+            *self.1.0.dt.get() = Some(dt);
+            *self.1.0.warp.get() = Some(warp);
+        }
 
         self.0.phase.fetch_xor(true, Ordering::Release);
         self.wait();
@@ -174,6 +185,10 @@ impl<T: Copy> EpochHandle<T> {
             back_off(&mut spins);
         };
         self.last_phase = p;
+        // SAFETY: the Acquire load above saw the coordinator's Release flip, so
+        // its write to `dt` is visible; and the coordinator writes `dt` again
+        // only after this worker's `Epoch` (created below) is dropped, or —
+        // when it was cleared to `None` on `Drop` — never again.
         let _ = unsafe { *self.h.dt.get() }?;
         Some(Epoch(self.h.clone()))
     }
@@ -204,10 +219,15 @@ impl<T: Copy> Epoch<T> {
     }
 
     pub fn dt(&self) -> &T {
+        // SAFETY: while this `Epoch` lives the coordinator does not write `dt`
+        // (it waits for every worker's `Epoch` to drop first), and the borrow
+        // returned cannot outlive `self`. A standalone or empty epoch has no
+        // coordinator at all.
         unsafe { &*self.0.dt.get() }.as_ref().unwrap()
     }
 
     pub fn warp(&self) -> &T {
+        // SAFETY: as `dt` — `warp` is written in the same window.
         unsafe { &*self.0.warp.get() }.as_ref().unwrap()
     }
 
