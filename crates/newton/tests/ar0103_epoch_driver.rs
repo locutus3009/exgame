@@ -140,12 +140,14 @@ async fn driver_matches_solo_trajectories_bit_exactly() {
         together.push((mech, ids));
     }
     let epoch = Epoch::standalone(DT, 1.0);
+    let mut solo: Vec<_> = solo.into_iter().map(Vec::into_iter).collect();
     for step in 0..STEPS {
         driver.step(&epoch).await.unwrap();
-        for (i, (mech, ids)) in together.iter().enumerate() {
+        for (i, ((mech, ids), want)) in together.iter().zip(&mut solo).enumerate() {
             let got = positions(mech, ids).await;
             assert_eq!(
-                got, solo[i][step],
+                Some(got),
+                want.next(),
                 "mechanism {i} diverged from its solo run at step {step}"
             );
         }

@@ -428,6 +428,9 @@ impl Shaders {
                 && let Some(f) = &self.fault
             {
                 f.trip(gpu_batches)?;
+                if let Some(grow) = f.grow.lock().unwrap().take() {
+                    grow();
+                }
             }
 
             let command_buffer = builder.build().map_err(Self::backend)?;
@@ -441,6 +444,10 @@ impl Shaders {
                 .filter(|(_, batch)| !batch.is_empty())
                 .find_map(|(kind, _)| self.shaders[kind].stale());
             if let Some(t) = grown {
+                #[cfg(test)]
+                if let Some(f) = &self.fault {
+                    f.rerecorded.fetch_add(1, Ordering::SeqCst);
+                }
                 attempt += 1;
                 if attempt > Self::MAX_RERECORD {
                     return Err(Self::backend(format!(
@@ -507,6 +514,11 @@ pub(crate) struct FaultInjector {
     fail: std::sync::atomic::AtomicUsize,
     /// Messages each failed flush carried, in order.
     failed_jobs: std::sync::Mutex<Vec<usize>>,
+    /// Run once, on the worker, after the next flush is recorded and before
+    /// its guards are taken — to grow a storage inside that gap.
+    grow: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Recordings thrown away because a bound storage had grown.
+    rerecorded: AtomicUsize,
 }
 
 #[cfg(test)]
@@ -1801,6 +1813,46 @@ mod tests {
     fn gpu_path_rejects_non_f32_world() {
         let world = Arc::new(World::builder().usual::<f64>());
         let _accel = Accelerator::<f64>::builder(world).build();
+    }
+
+    /// A storage that grows after a flush is recorded but before its guards are
+    /// taken must not make the kernel run on the old buffer, nor fail the job:
+    /// the flush notices under the guards and records again.
+    #[tokio::test]
+    async fn growth_between_recording_and_guards_is_rerecorded_not_reported() {
+        const INITIAL: usize = 16;
+        let world = Arc::new(World::builder().capacity(INITIAL).usual::<f32>());
+        let (a, b, out) = {
+            let mut map = world.write::<f32>();
+            (map.add(2.0), map.add(3.0), map.add(0.0))
+        };
+        let fault = Arc::new(FaultInjector::default());
+        let grown_keys = Arc::new(std::sync::Mutex::new(Vec::new()));
+        {
+            let (world, keys) = (world.clone(), grown_keys.clone());
+            *fault.grow.lock().unwrap() = Some(Box::new(move || {
+                let mut map = world.write::<f32>();
+                let mut keys = keys.lock().unwrap();
+                keys.extend((0..4 * INITIAL).map(|_| map.add(0.0)));
+            }));
+        }
+        let generation = world.generation(TypeId::of::<f32>());
+        let accel = Accelerator::<f32>::builder(world.clone())
+            .inject_faults(fault.clone())
+            .build();
+
+        accel.simple_sum(&a, &b, &out).await.unwrap();
+
+        assert_ne!(
+            world.generation(TypeId::of::<f32>()),
+            generation,
+            "the hook did not grow the storage"
+        );
+        assert_eq!(
+            fault.rerecorded.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(out.read(), 5.0, "the kernel did not reach the grown buffer");
     }
 
     /// A flush that fails must answer EVERY job it carried with
