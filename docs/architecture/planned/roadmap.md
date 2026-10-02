@@ -21,9 +21,11 @@ beginning of the space age on Terra. The setting is deliberately neutral about g
 ## The scalar split, and one conflict that comes before everything else
 
 **The scalar question is decided:** `f32` for local physics, fixed-point for the reference frames
-themselves. That is what the code does: kernels run in `f32` on island-local poses, and each
-island's origin is a fixed-point anchor (`Fix<I96F32>`). M1's AR-0107 measured the split working,
-with kernel inputs independent of world offset up to 10⁹. Two documents still say otherwise and
+themselves. The code is shaped for it but does not yet commit to it: kernels run in `f32` on
+island-local poses, while an island's origin is a generic scalar `S` (`mechanism/island.rs`), and
+only M1's AR-0107 test instantiates it as a fixed-point anchor (`Fix<I96F32>`). That test measured
+the split working, with kernel inputs independent of world offset up to 10⁹. Making fixed-point
+frames the production default, not a test instantiation, is M3's frame/local boundary task. Two documents still say otherwise and
 are stale: [decided/single-scalar-type](../decided/single-scalar-type.md), which demands one type
 everywhere, and [open/fixed-point-vs-f64](../open/fixed-point-vs-f64.md), which leans to `f64`.
 Superseding both with a record of the split is part of M2's AR-0206. What remains to design
@@ -60,7 +62,7 @@ This milestone starts with one decision only the owner can make, as a design rev
 
 | Candidate | What |
 | --- | --- |
-| Frame/local boundary | Make the split a type: frame quantities are fixed-point, local ones `f32`, and the only conversion is the anchor-relative one, so an absolute position cannot reach `f32` by accident. |
+| Frame/local boundary | Make fixed-point the production island origin, and make the split a type: frame quantities are fixed-point, local ones `f32`, and the only conversion is the anchor-relative one, so an absolute position cannot reach `f32` by accident. |
 | World fork | `World::fork` (or the D1 equivalent): a copy-on-branch snapshot whose stepping cannot touch the parent, with a test that a branch and its parent diverge only by the inputs applied to the branch. |
 | Prediction tier | A secondary predictor that steps a fork forward, stops at predicted contact as contact-prediction-display requires, and never writes back. |
 | Determinism gate | Bit-reproducible integrated state across runs and batch compositions, made a gate in `tools/quality/run-gates.sh`, scoped as [open/determinism-boundary](../open/determinism-boundary.md) says. |
