@@ -5,7 +5,7 @@
 
 ## Portfolio overview
 
-**16 ARs tracked** across 2 active status categories.
+**17 ARs tracked** across 2 active status categories.
 
 | Status | Meaning | Count |
 | --- | --- | ---: |
@@ -13,7 +13,7 @@
 | **In review** | Submitted by its worker, awaiting a coordinator decision | 0 |
 | **Open** | Dependency-ready and available to claim | 0 |
 | **Blocked** | Cannot proceed until its recorded blocker clears | 0 |
-| **Planned** | Defined work awaiting promotion or dependencies | 8 |
+| **Planned** | Defined work awaiting promotion or dependencies | 9 |
 | **Future** | Deferred roadmap work | 0 |
 | **Done** | Accepted, integrated, and durably verified | 8 |
 | **Cancelled** | Stopped with a recorded rationale | 0 |
@@ -48,6 +48,7 @@ flowchart LR
         AR_0206["AR-0206 - Planned"]:::status_planned
         AR_0207["AR-0207 - Planned"]:::status_planned
         AR_0208["AR-0208 - Planned"]:::status_planned
+        AR_0209["AR-0209 - Planned"]:::status_planned
     end
     AR_0101 --> AR_0102
     AR_0101 --> AR_0108
@@ -62,15 +63,23 @@ flowchart LR
     AR_0107 --> AR_0108
     AR_0201 --> AR_0205
     AR_0201 --> AR_0206
+    AR_0201 --> AR_0209
     AR_0202 --> AR_0206
+    AR_0202 --> AR_0209
     AR_0203 --> AR_0206
     AR_0203 --> AR_0207
+    AR_0203 --> AR_0209
     AR_0204 --> AR_0206
     AR_0204 --> AR_0208
+    AR_0204 --> AR_0209
     AR_0205 --> AR_0206
+    AR_0205 --> AR_0209
     AR_0207 --> AR_0206
     AR_0207 --> AR_0208
+    AR_0207 --> AR_0209
     AR_0208 --> AR_0206
+    AR_0208 --> AR_0209
+    AR_0209 --> AR_0206
     classDef status_in_progress fill:#1565c0,color:#ffffff,stroke:#263238,stroke-width:2px
     classDef status_in_review fill:#ad1457,color:#ffffff,stroke:#263238,stroke-width:2px
     classDef status_open fill:#2e7d32,color:#ffffff,stroke:#263238,stroke-width:2px
@@ -94,18 +103,19 @@ flowchart LR
 | [AR-0106](tasks/AR-0106.md) | None | [AR-0101](tasks/AR-0101.md), [AR-0108](tasks/AR-0108.md) |
 | [AR-0107](tasks/AR-0107.md) | None | [AR-0108](tasks/AR-0108.md) |
 | [AR-0108](tasks/AR-0108.md) | [AR-0101](tasks/AR-0101.md), [AR-0102](tasks/AR-0102.md), [AR-0103](tasks/AR-0103.md), [AR-0104](tasks/AR-0104.md), [AR-0105](tasks/AR-0105.md), [AR-0106](tasks/AR-0106.md), [AR-0107](tasks/AR-0107.md) | None |
-| [AR-0201](tasks/AR-0201.md) | None | [AR-0205](tasks/AR-0205.md), [AR-0206](tasks/AR-0206.md) |
-| [AR-0202](tasks/AR-0202.md) | None | [AR-0206](tasks/AR-0206.md) |
-| [AR-0203](tasks/AR-0203.md) | None | [AR-0206](tasks/AR-0206.md), [AR-0207](tasks/AR-0207.md) |
-| [AR-0204](tasks/AR-0204.md) | None | [AR-0206](tasks/AR-0206.md), [AR-0208](tasks/AR-0208.md) |
-| [AR-0205](tasks/AR-0205.md) | [AR-0201](tasks/AR-0201.md) | [AR-0206](tasks/AR-0206.md) |
-| [AR-0206](tasks/AR-0206.md) | [AR-0201](tasks/AR-0201.md), [AR-0202](tasks/AR-0202.md), [AR-0203](tasks/AR-0203.md), [AR-0204](tasks/AR-0204.md), [AR-0205](tasks/AR-0205.md), [AR-0207](tasks/AR-0207.md), [AR-0208](tasks/AR-0208.md) | None |
-| [AR-0207](tasks/AR-0207.md) | [AR-0203](tasks/AR-0203.md) | [AR-0206](tasks/AR-0206.md), [AR-0208](tasks/AR-0208.md) |
-| [AR-0208](tasks/AR-0208.md) | [AR-0204](tasks/AR-0204.md), [AR-0207](tasks/AR-0207.md) | [AR-0206](tasks/AR-0206.md) |
+| [AR-0201](tasks/AR-0201.md) | None | [AR-0205](tasks/AR-0205.md), [AR-0206](tasks/AR-0206.md), [AR-0209](tasks/AR-0209.md) |
+| [AR-0202](tasks/AR-0202.md) | None | [AR-0206](tasks/AR-0206.md), [AR-0209](tasks/AR-0209.md) |
+| [AR-0203](tasks/AR-0203.md) | None | [AR-0206](tasks/AR-0206.md), [AR-0207](tasks/AR-0207.md), [AR-0209](tasks/AR-0209.md) |
+| [AR-0204](tasks/AR-0204.md) | None | [AR-0206](tasks/AR-0206.md), [AR-0208](tasks/AR-0208.md), [AR-0209](tasks/AR-0209.md) |
+| [AR-0205](tasks/AR-0205.md) | [AR-0201](tasks/AR-0201.md) | [AR-0206](tasks/AR-0206.md), [AR-0209](tasks/AR-0209.md) |
+| [AR-0206](tasks/AR-0206.md) | [AR-0201](tasks/AR-0201.md), [AR-0202](tasks/AR-0202.md), [AR-0203](tasks/AR-0203.md), [AR-0204](tasks/AR-0204.md), [AR-0205](tasks/AR-0205.md), [AR-0207](tasks/AR-0207.md), [AR-0208](tasks/AR-0208.md), [AR-0209](tasks/AR-0209.md) | None |
+| [AR-0207](tasks/AR-0207.md) | [AR-0203](tasks/AR-0203.md) | [AR-0206](tasks/AR-0206.md), [AR-0208](tasks/AR-0208.md), [AR-0209](tasks/AR-0209.md) |
+| [AR-0208](tasks/AR-0208.md) | [AR-0204](tasks/AR-0204.md), [AR-0207](tasks/AR-0207.md) | [AR-0206](tasks/AR-0206.md), [AR-0209](tasks/AR-0209.md) |
+| [AR-0209](tasks/AR-0209.md) | [AR-0201](tasks/AR-0201.md), [AR-0202](tasks/AR-0202.md), [AR-0203](tasks/AR-0203.md), [AR-0204](tasks/AR-0204.md), [AR-0205](tasks/AR-0205.md), [AR-0207](tasks/AR-0207.md), [AR-0208](tasks/AR-0208.md) | [AR-0206](tasks/AR-0206.md) |
 
 ## Complete AR inventory
 
-### Planned (8)
+### Planned (9)
 
 | Priority | AR | Owner | Summary | Next action |
 | --- | --- | --- | --- | --- |
@@ -115,6 +125,7 @@ flowchart LR
 | P1 | [AR-0204](tasks/AR-0204.md): Place a body at the island anchor&#x27;s full precision | Unclaimed | AR-0107 measured that bodies enter as absolute f32 poses, so at 1e6-1e9 the position is rounded before the fixed-point island anchor applies. Add a construction path that keeps full precision. | Claim; read crates/newton/tests/precision_seam.rs and how islands pick their anchor, then propose the API in an evidence note before implementing. |
 | P1 | [AR-0207](tasks/AR-0207.md): A first physically consistent configuration of the star system | Unclaimed | The owner&#x27;s setting sketch (G-class star, Saturn-class giant, habitable moon) has no physical configuration yet. Design a first one and show the engine keeps it stable over many orbits. | Claim after AR-0203 lands; read docs/architecture/planned/setting.md and setting-patera.md, then write the proposed parameter table as an evidence note before coding. |
 | P1 | [AR-0208](tasks/AR-0208.md): A ship you can fly: thrust and attitude control in the star system | Unclaimed | Nothing in the tree can be played. Add a ship body with thrust and attitude control in the AR-0207 system, a headless scripted-burn scenario test, and a melies example a person can fly. | Claim after AR-0207 and AR-0204 land; read crates/melies (app.rs, the Example trait) and how forces enter a mechanism, then propose the control interface in an evidence note. |
+| P1 | [AR-0209](tasks/AR-0209.md): Performance review and optimisation of everything M2 added | Unclaimed | Every milestone ends with a performance review. Profile the workloads M2 added (oracle, Pater scenario, ship scenario, conservation and orbit runs), fix what the profile names, record before/after. | Claim after AR-0201..0205, 0207 and 0208 are done; profile the AR-0207 and AR-0208 scenarios first, since they are what the demo will run. |
 | P2 | [AR-0205](tasks/AR-0205.md): Fatal coverage for BodyPost and a typed EvalError::Fatal | Unclaimed | BodyPost kernels trace zero fatal slots although Motor::inverse divides, so a degenerate motor is never flagged; and EvalError::Fatal exists but nothing produces it. Close both. | Claim after AR-0201 lands (its oracle protects the kernel change); find why the BodyPost trace drops the inverse&#x27;s division guard. |
 | P3 | [AR-0206](tasks/AR-0206.md): Close the documentation drift M1 and M2 leave behind | Unclaimed | docs/QUALITY.md still lists the FIXME: deadlock? sites and the physics checks as deferred, and hitchcock test comments still blame a Lua backend. Bring the documents in line with M1 and M2. | Claim after every other M2 AR is done; grep docs/ and crates/ for claims M1 and M2 made false. |
 

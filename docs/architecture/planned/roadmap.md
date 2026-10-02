@@ -4,7 +4,23 @@
 governed by [its milestone document](../../../coordination/milestones/M2.md); everything here is a
 proposal. A milestone becomes real only when it gets a document in `coordination/milestones/` and
 its tasks get plans. The further down this page, the less detail, on purpose: the near milestones
-are derived from design documents that already exist, the far ones from intent only.
+are derived from design documents that already exist, the far ones from intent only. The roadmap
+ends at the demo (M9); what follows it is planned with the owner once the demo exists.
+
+## Rules every milestone follows
+
+- **Each milestone ends with a performance review and optimisation task.** Profile the workloads
+  the milestone added or changed, record where the time goes, fix what the profile names, and
+  record the before/after numbers. It is a required task of the milestone, not a follow-up, and
+  the milestone does not close without it. M2 carries it as AR-0209.
+- **Build time is not a constraint.** Heavier build-time code generation, more specialised
+  kernels, longer compile times are all acceptable when they buy runtime speed.
+- **Runtime cost decides design questions.** A technique that costs a lot of runtime
+  performance is out, however elegant: that is why the energy-Hessian implicit solver
+  ([implicit-solver-energy-hessian](./implicit-solver-energy-hessian.md)) is not on this roadmap.
+- **No relativistic layer.** [open/relativistic-layer](../open/relativistic-layer.md) and
+  [relativistic-renderer](./relativistic-renderer.md) record a discussion, not a plan. Nothing
+  here builds toward them.
 
 ## Where the project stands
 
@@ -106,18 +122,20 @@ is, an example host on `wgpu`; the game's renderer is a new crate.
 | --- | --- |
 | Backend decision | Record the vulkano-on-`rembrandt` choice (or its rejection) in `decided/`, with the UI framework that follows from it. |
 | Device sharing | One device, a compute queue and a graphics queue, with synchronisation between a frame and a flush. The renderer reads; it never writes simulation state (invariant 1). |
-| Tactical view | The de-relativised sensor view first: bodies, orbits and predicted trajectories from the M3 prediction tier, with the contact marker contact-prediction-display requires. |
+| Tactical view | The sensor / tactical view first: bodies, orbits and predicted trajectories from the M3 prediction tier, with the contact marker contact-prediction-display requires. |
 | Scale range | Rendering from a cockpit to the companion star: camera-relative `f32` against fixed-point frames, reversed or logarithmic depth. |
-| HDR from day one | An HDR, linear-light pipeline, because [relativistic-renderer](./relativistic-renderer.md) makes clipping to sRGB a non-starter later. |
+| HDR from day one | An HDR, linear-light pipeline: a young G star, a gas giant filling Terra's sky and moonlit nights span far more range than sRGB, and retrofitting HDR is a rewrite. |
 | Camera | The `hitchcock` rig as the game camera, and the deferred threads of [open/camera-attitude](../open/camera-attitude.md). |
 
-## M6 — Performance with a frame budget
+## M6 — A frame budget, enforced
 
 **Outcome.** Measured budgets for a frame that includes both simulation and rendering, enforced by
-criterion benchmarks on an agreed gate machine.
+criterion benchmarks on an agreed gate machine, so a regression fails a gate instead of being
+found by the next milestone's review.
 
-Performance comes after graphics on purpose. Until a frame exists there is no budget to hold the
-simulation to, and M0 and M2 both deferred budgets for want of one. What is already measured: the
+Every milestone already ends with a performance review; this one turns the reviews into enforced
+budgets, and it comes after graphics because until a frame exists there is no budget to hold the
+simulation to. M0 and M2 both deferred budgets for want of one. What is already measured: the
 step is bound by submission latency (about 52 µs per flush, whatever it carries), and cloth step
 time grows as m^1.24 after M1's message reshaping.
 
@@ -133,20 +151,26 @@ rigid finite elements with elastic nodes and kinematic joints, propellant and ma
 maneuver planning on the M3 prediction tier, and contact as a branch-breaking re-base event. M2's
 flyable ship is the seed; this is the version a game can be built on.
 
-## M8 — A first playable game
+## M8 — Surfaces and atmospheres
 
-**Outcome.** Something a person plays rather than tests. setting-patera leaves the genre open; the
-engine most naturally serves a sandbox in the KSP tradition, starting where the story does, at the
-beginning of Terra's space age: reach orbit, reach Rhea and Io, and eventually reach the Ark at L5.
-The genre is the owner's call and this milestone cannot be planned until it is made.
+**Outcome.** Terra has a surface to stand on and an atmosphere to climb through and fall back into,
+because the demo starts on the ground. Terra's geography, climate and sky are richly specified in
+setting-patera (tidally locked, near side and far side, a 7-day day); none of it has an engine
+counterpart yet.
 
-## Later, deliberately unplanned
+**Candidate tasks.** A surface model for Terra at the resolution a launch and a landing need
+(terrain as data, contact through the decided contact operator); an atmosphere model for drag and
+heating during ascent and reentry, with the reentry-class step reduction of vessel-model-rfe as
+its only variable-step path; rendering the surface and the sky from the ground (Pater overhead, the
+eclipse seasons); and the same for Rhea and Io at lower fidelity, since they are the first
+destinations.
 
-- **The relativistic layer.** Rapidity-carried ship kinematics and the optional 1PN terms of
-  [open/relativistic-layer](../open/relativistic-layer.md), and the two-view relativistic renderer.
-  Ships near light speed belong far beyond the story's present, so this waits.
-- **Planetary surfaces, atmospheres and reentry.** Terra's geography is richly specified in
-  setting-patera; none of it has an engine counterpart yet.
-- **The implicit-solver energy Hessian** of [implicit-solver-energy-hessian](./implicit-solver-energy-hessian.md),
-  when vessel stiffness makes the current Newton solve the bottleneck.
-- **Story, factions, economy:** the drivers setting-patera's section 11 lists. Content, not engine.
+## M9 — The demo
+
+**Outcome.** Something a person plays rather than tests, set where the story starts: the beginning
+of Terra's space age. Launch from Terra's surface, reach orbit, reach Rhea or Io, and see the Ark
+at L5 from afar. setting-patera leaves the genre open; the engine most naturally serves a sandbox
+in the KSP tradition, and the demo is built so that choice can still be made after it.
+
+The roadmap stops here. Economy, story, factions and everything after the demo are planned with
+the owner once the demo exists.
