@@ -3,12 +3,6 @@
 This file is generated. Read `README.md`, then use `tools/handoffctl snapshot`.
 Never edit this file directly.
 
-## In Review
-
-| Priority | Task | Summary | Next action | Owner |
-| --- | --- | --- | --- | --- |
-| P3 | [AR-0107](tasks/AR-0107.md): Precision seam: measure f32 base poses far from the origin | The shaders bind Motor<f32> base poses directly; ACCELERATOR.md Part V calls the precision of that narrowing unexamined. Islands re-anchor at their centre of mass; measure whether that suffices. | Claim; write a test that steps the same mechanism at the origin and translated far away and compares relative motion. | Submitted by worker-ar0107 |
-
 ## Planned
 
 | Priority | Task | Summary | Next action | Owner |
@@ -25,3 +19,4 @@ Never edit this file directly.
 | P1 | [AR-0103](tasks/AR-0103.md): Cross-mechanism epoch driver with frozen structure and quiescence flush | Nothing above Mechanism steps all mechanisms of an epoch; callers hand-roll join_all, structure can change mid-epoch, and the worker flushes on a 1 ns idle tick rather than on quiescence. | Claim after AR-0102 and AR-0104 land; design the driver API in the plan's evidence first, then implement and migrate callers. | - |
 | P1 | [AR-0105](tasks/AR-0105.md): Fix the two FIXME: deadlock? reproducers in the implicit solver | dimension_change_reallocates_and_clears_the_hint and topology_change_causes_no_visible_jolt are #[ignore]d with 'FIXME: deadlock?'. Suspected: a WorldKey dropped while world.write::<T>() is held. | Claim; run both ignored tests with a timeout to confirm the hang, then confirm or refute the suspected cause before changing code. | - |
 | P2 | [AR-0106](tasks/AR-0106.md): Fatal semantics: size and count fatal slots from the trace | Kernels write fatal operands into a fixed float fatal[20] (build.rs FIXME), and n_fatals per kind is hand-entered in shaders.rs. Derive both from the trace and pin the mark-and-continue semantics. | Claim; read build.rs fatal_map and the shaders.rs check table, then make build.rs emit the per-kind fatal count. | - |
+| P3 | [AR-0107](tasks/AR-0107.md): Precision seam: measure f32 base poses far from the origin | The shaders bind Motor<f32> base poses directly; ACCELERATOR.md Part V calls the precision of that narrowing unexamined. Islands re-anchor at their centre of mass; measure whether that suffices. | Claim; write a test that steps the same mechanism at the origin and translated far away and compares relative motion. | - |
