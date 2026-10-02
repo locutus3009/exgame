@@ -320,47 +320,34 @@ impl Claimed {
 
 #[derive(Default)]
 struct LedgerState {
-    /// Kinds set up in the current flush whose `check` has not run yet. Every
-    /// non-empty batch gets exactly one `setup` and, once the submission is
-    /// done, one `check`; a `setup` that finds this at zero opens a new flush.
-    open: usize,
     /// Per output storage, the slots claimed so far in this flush.
     claimed: Vec<(TypeId, Claimed)>,
-    /// Why this flush was refused, once it has been.
-    refused: Option<String>,
 }
 
 /// The one-writer-per-slot check (ACCELERATOR.md Part III), shared by every
 /// kind of one accelerator because a flush spans kinds.
 ///
-/// Each `setup` claims the output slots of every row it is about to dispatch.
-/// A slot claimed twice in one flush — by two rows of one kind or by two kinds —
-/// REFUSES the flush: the kind that found the collision and every kind set up
-/// after it dispatch nothing, and `check` fails every message of the flush with
-/// `EvalError::Backend`. Kinds already recorded before the collision was seen
-/// did run (`Shaders::dispatch` records each kind as it sets it up, so a later
-/// kind cannot withdraw an earlier one), but they ran without the colliding
-/// writer, and their callers are failed all the same: the flush as a whole
-/// broke the invariant.
+/// `Shaders::dispatch` runs it as a PRE-PASS: it opens the flush with
+/// [`Ledger::begin`], then claims the output slots of every row of every kind
+/// the flush carries, and only then records anything. A slot claimed twice in
+/// one flush — by two rows of one kind or by two kinds — REFUSES the whole
+/// flush before a single kind is recorded: nothing is dispatched, and every
+/// message of the flush fails with `EvalError::Backend`.
 #[derive(Default)]
 pub(super) struct Ledger(Mutex<LedgerState>);
 
 impl Ledger {
-    /// Open the kind's part of the flush and claim its output slots. `Err`
-    /// carries the refusal; the caller then dispatches nothing.
+    /// Open a new flush: forget every slot the previous one claimed.
+    pub(super) fn begin(&self) {
+        let mut st = self.0.lock().unwrap();
+        st.claimed.iter_mut().for_each(|(_, c)| c.clear());
+    }
+
+    /// Claim the output slots of one kind's batch in the open flush. `Err`
+    /// carries the refusal; the caller then records nothing at all.
     fn claim(&self, kind: &'static str, writes: &Writes, batch: &[Pending]) -> Result<(), String> {
         let mut st = self.0.lock().unwrap();
-        if st.open == 0 {
-            st.claimed.iter_mut().for_each(|(_, c)| c.clear());
-            st.refused = None;
-        }
-        st.open += 1;
-        if let Some(why) = &st.refused {
-            return Err(why.clone());
-        }
-        let LedgerState {
-            claimed, refused, ..
-        } = &mut *st;
+        let claimed = &mut st.claimed;
         let mut clash = None;
         'rows: for (MessageInput { payload, .. }, _) in batch {
             let MessagePayload::Rows { rows } = payload;
@@ -395,24 +382,21 @@ impl Ledger {
             }
         }
         match clash {
-            Some(why) => {
-                *refused = Some(why.clone());
-                Err(why)
-            }
+            Some(why) => Err(why),
             None => Ok(()),
         }
-    }
-
-    /// Close the kind's part of the flush; the refusal, if the flush was refused.
-    fn close(&self) -> Option<String> {
-        let mut st = self.0.lock().unwrap();
-        st.open -= 1;
-        st.refused.clone()
     }
 }
 
 pub(super) trait ShaderSetup: Sync + Send {
     fn storages(&self) -> &Vec<TypeId>;
+    /// Claim the output slots of `batch` in the flush the shared [`Ledger`]
+    /// has open. Runs for every kind before any kind is recorded.
+    fn claim(&self, batch: &[Pending]) -> Result<(), String>;
+    /// The first storage this kernel's descriptor set binds whose buffer has
+    /// been reallocated since the set was written, if any. Lock-free, so it can
+    /// be asked while the flush holds the storages' guards.
+    fn stale(&self) -> Option<TypeId>;
     /// Fill the batch table and bind the pipeline; return how many INVOCATIONS the
     /// batch needs. That is not `batch.len()` for the row-driven stages: one
     /// message there carries a whole round, so it occupies a contiguous span of
@@ -519,7 +503,7 @@ macro_rules! plain_shader {
             /// guards, so the read guards `bind` takes cannot meet its own.
             fn current_set(&self) -> Arc<DescriptorSet> {
                 let mut bound = self.bound.lock().unwrap();
-                if self.stale(&bound).is_some() {
+                if self.stale_since(&bound).is_some() {
                     *bound = Self::bind(
                         &self.world,
                         &self.pipeline,
@@ -533,7 +517,7 @@ macro_rules! plain_shader {
 
             /// The first bound storage whose generation moved since `bound`
             /// was written, if any.
-            fn stale(&self, bound: &Bound) -> Option<TypeId> {
+            fn stale_since(&self, bound: &Bound) -> Option<TypeId> {
                 self.storages
                     .iter()
                     .zip(&bound.generations)
@@ -637,6 +621,16 @@ macro_rules! plain_shader {
         impl ShaderSetup for $name {
 	    fn storages(&self) -> &Vec<TypeId> { &self.storages }
 
+            fn claim(&self, batch: &[Pending]) -> Result<(), String> {
+                self.ledger
+                    .claim(std::any::type_name::<Self>(), &self.writes, batch)
+            }
+
+            fn stale(&self) -> Option<TypeId> {
+                let bound = self.bound.lock().unwrap();
+                self.stale_since(&bound)
+            }
+
             fn setup(
                 &self,
                 builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
@@ -645,15 +639,6 @@ macro_rules! plain_shader {
                     Option<oneshot::Sender<Result<(), EvalError>>>,
                 )],
             ) -> Result<u32, EvalError> {
-                // Before anything is recorded: a refused kind binds nothing and
-                // dispatches nothing, and `check` fails its messages.
-                if self
-                    .ledger
-                    .claim(std::any::type_name::<Self>(), &self.writes, batch)
-                    .is_err()
-                {
-                    return Ok(0);
-                }
                 let total: usize = batch
                     .iter()
                     .map(|(MessageInput { payload, .. }, _)| {
@@ -686,33 +671,17 @@ macro_rules! plain_shader {
                     Option<oneshot::Sender<Result<(), EvalError>>>,
                 )>,
             ) -> Vec<MessageInput> {
-                let refused = self.ledger.close();
                 let mut retired = Vec::with_capacity(batch.len());
-                // A refused flush ran nothing of this kind (or ran it beside a
-                // refused one): every message fails, and the fatal table holds a
-                // previous flush's marks, so it is not read.
-                if let Some(why) = refused {
-                    for (input, respond_to) in batch.drain(..) {
-                        if let Some(respond_to) = respond_to {
-                            let _b = respond_to.send(Err(EvalError::Backend {
-                                shader: std::any::type_name::<Self>(),
-                                msg: why.clone(),
-                            }));
-                        }
-                        retired.push(input);
-                    }
-                    return retired;
-                }
                 let fatals = self.fatals.read().unwrap();
-                // A storage that grew after `setup` bound it was reallocated
-                // between recording and submit, so the kernel ran on the old copy:
-                // its inputs may be stale and its outputs did not reach the live
-                // buffer. Fail the batch rather than report garbage as success.
+                // BACKSTOP. `Shaders::dispatch` re-checks every bound storage
+                // under the flush's guards and re-records on growth, so a kernel
+                // never runs on a reallocated buffer. Should one slip through
+                // anyway, fail the batch rather than report garbage as success.
                 // Growth after the fence is reported too — harmless, but it
                 // cannot be told apart from here.
                 let grown = {
                     let bound = self.bound.lock().unwrap();
-                    self.stale(&bound)
+                    self.stale_since(&bound)
                 };
                 // Fatals stay per INVOCATION, so a message owns the span it filled
                 // and its outcome is the outcome of any row inside that span. Only
@@ -766,7 +735,7 @@ macro_rules! define_shaders {
     // Entry: rolling list of all your shader entries.
     // $w:expr — the device/context reference you pass to `new()`.
     (
-        $w:expr;
+        $w:expr, $ledger:expr;
         $(
             @ $mode:ident
             $name:ident,
@@ -785,7 +754,7 @@ macro_rules! define_shaders {
 
             // 2. Build the runtime HashMap.
             let mut __shaders: HashMap<MessageKind, Box<dyn ShaderSetup>> = HashMap::new();
-            let __ledger = Arc::new(Ledger::default());
+            let __ledger = $ledger;
             $(
                 define_shaders!(@insert $mode, $name, $eval, __shaders, $w, $writes, __ledger);
             )*
@@ -809,9 +778,12 @@ macro_rules! define_shaders {
     };
 }
 
-pub(super) fn all_shaders(w: &Arc<World>) -> HashMap<MessageKind, Box<dyn ShaderSetup>> {
+pub(super) fn all_shaders(
+    w: &Arc<World>,
+    ledger: &Arc<Ledger>,
+) -> HashMap<MessageKind, Box<dyn ShaderSetup>> {
     define_shaders!(
-        &w;   // <-- pass your context reference here once
+        &w, ledger;   // <-- pass your context reference here once
         @row     SimpleSum, shader_simple_sum, EvalSimpleSum, fatal_width::<shader_simple_sum::Fatals>(), [[u32; 128], f32], writes!(2 => f32);
         @row     CriticallyDampedWarpedPlain, critically_damped_warped_plain, EvalCriticallyDampedWarpedPlain, fatal_counts::CRITICALLY_DAMPED_WARPED_PLAIN, [[u32; 128], f32, Twist<f32>, Motor<f32>, [Wrench<f32>; 2]], writes!(4 => [Wrench<f32>; 2]);
         @row     CriticallyDampedWarpedJacobian, critically_damped_warped_jacobian, EvalCriticallyDampedWarpedJacobian, fatal_counts::CRITICALLY_DAMPED_WARPED_JACOBIAN, [[u32; 128], f32, Twist<f32>, Motor<f32>, [[Wrench<f32>; 24]; 2], [Wrench<f32>; 2]], writes!(4 => [[Wrench<f32>; 24]; 2], 5 => [Wrench<f32>; 2]);
@@ -920,8 +892,11 @@ mod tests {
     fn fatal_fails_only_its_own_message(kind: MessageKind, jacobian: bool) {
         let world = Arc::new(World::builder().usual::<f32>());
         let g = world.gpu();
+        let ledger = Arc::new(Ledger::default());
         let shaders = Shaders {
-            shaders: all_shaders(&world),
+            shaders: all_shaders(&world, &ledger),
+            ledger,
+            fault: None,
             cmd_allocator: g.cmd_allocator().clone(),
             gpu: g.clone(),
             world: world.clone(),
@@ -1029,8 +1004,11 @@ mod tests {
 
     fn bare_shaders(world: &Arc<World>) -> Shaders {
         let g = world.gpu();
+        let ledger = Arc::new(Ledger::default());
         Shaders {
-            shaders: all_shaders(world),
+            shaders: all_shaders(world, &ledger),
+            ledger,
+            fault: None,
             cmd_allocator: g.cmd_allocator().clone(),
             gpu: g.clone(),
             world: world.clone(),
@@ -1102,7 +1080,7 @@ mod tests {
         let (m2, rx2) = raw_message(&world, kind, &[sum_row(&k[0], &k[3], own)]);
         let mut batches: PendingByKind = HashMap::new();
         batches.insert(kind, vec![m0, m1, m2]);
-        shaders.dispatch(&mut batches).unwrap();
+        shaders.flush(&mut batches);
 
         for rx in [rx0, rx1, rx2] {
             assert_refused(outcome(rx));
@@ -1122,7 +1100,7 @@ mod tests {
         let (m, rx) = raw_message(&world, kind, &[row, row]);
         let mut batches: PendingByKind = HashMap::new();
         batches.insert(kind, vec![m]);
-        shaders.dispatch(&mut batches).unwrap();
+        shaders.flush(&mut batches);
 
         assert_refused(outcome(rx));
         assert_eq!(k[2].read(), FRESH);
@@ -1130,7 +1108,8 @@ mod tests {
 
     /// Two KINDS write one slot in one flush — `simple_sum`'s `out` and a
     /// `BlockReduce` partial over the same scalar storage. Both callers are
-    /// refused, and the slot holds at most one writer's value.
+    /// refused, and the refusal is strict: the check is a pre-pass over every
+    /// kind of the flush, so neither kind was recorded and the slot is untouched.
     #[test]
     fn two_writers_across_kinds_refuse_the_flush() {
         let world = Arc::new(World::builder().usual::<f32>());
@@ -1148,12 +1127,11 @@ mod tests {
         let mut batches: PendingByKind = HashMap::new();
         batches.insert(MessageKind::EvalSimpleSum, vec![m0]);
         batches.insert(MessageKind::BlockReduce, vec![m1]);
-        shaders.dispatch(&mut batches).unwrap();
+        shaders.flush(&mut batches);
 
         assert_refused(outcome(rx0));
         assert_refused(outcome(rx1));
-        let v = k[2].read();
-        assert!([FRESH, 3.0, 0.0].contains(&v), "slot holds {v}");
+        assert_eq!(k[2].read(), FRESH, "a kind of a refused flush still ran");
     }
 
     /// Negative case: the check is per FLUSH. The same slot written by one row
@@ -1171,13 +1149,13 @@ mod tests {
         let (m, rx) = raw_message(&world, kind, &[row, row]);
         let mut batches: PendingByKind = HashMap::new();
         batches.insert(kind, vec![m]);
-        shaders.dispatch(&mut batches).unwrap();
+        shaders.flush(&mut batches);
         assert_refused(outcome(rx));
 
         for (a, want) in [(&k[0], 3.0), (&k[2], 7.0)] {
             let (m, rx) = raw_message(&world, kind, &[sum_row(a, &k[1], &k[3])]);
             batches.insert(kind, vec![m]);
-            shaders.dispatch(&mut batches).unwrap();
+            shaders.flush(&mut batches);
             outcome(rx).unwrap();
             assert_eq!(k[3].read(), want);
         }

@@ -207,6 +207,8 @@ pub(crate) fn bake_incidence<T, S>(
 
 struct Shaders {
     shaders: HashMap<MessageKind, Box<dyn ShaderSetup>>,
+    /// The one-writer-per-slot ledger every shader of `shaders` claims into.
+    ledger: Arc<shaders::Ledger>,
     cmd_allocator: Arc<StandardCommandBufferAllocator>,
     gpu: Arc<GpuAccelerator>,
     world: Arc<World>,
@@ -222,38 +224,42 @@ impl Shaders {
         }
     }
 
+    /// Times a flush is re-recorded because a storage it binds grew between
+    /// recording and taking the guards, before it gives up with `Backend`.
+    /// Growth is a rare structural event, so one retry nearly always suffices.
+    const MAX_RERECORD: usize = 8;
+
+    /// Record every non-empty batch into one command buffer and submit it.
+    ///
+    /// Order matters twice:
+    /// 1. The one-writer check is a PRE-PASS over every kind of the flush, so a
+    ///    collision refuses the whole flush before any kind is recorded.
+    /// 2. `setup` binds the CURRENT buffer of each storage, taking read locks
+    ///    on them, so it has to run before the write guards are taken — the
+    ///    locks are not reentrant. A storage can therefore grow between
+    ///    recording and guarding. Once the guards are held growth is excluded,
+    ///    so the bindings are re-checked there, and a stale recording is thrown
+    ///    away and recorded again instead of being submitted against an old
+    ///    buffer.
     fn dispatch(&self, gpu_batches: &mut PendingByKind) -> Result<(), EvalError> {
-        let queue = self.gpu.queue();
-        let mut builder = AutoCommandBufferBuilder::primary(
-            self.cmd_allocator.clone(),
-            queue.queue_family_index(),
-            CommandBufferUsage::OneTimeSubmit,
-        )
-        .map_err(Self::backend)?;
-
-        let mut storages = HashSet::new();
-
+        self.ledger.begin();
         for (kind, batch) in gpu_batches.iter() {
             if batch.is_empty() {
                 continue;
             }
+            self.shaders[kind]
+                .claim(batch)
+                .map_err(|msg| EvalError::Backend {
+                    shader: "one-writer check",
+                    msg,
+                })?;
+        }
 
-            self.shaders[kind].storages().iter().for_each(|t| {
-                storages.insert(*t);
-            });
-            // `setup` reports the INVOCATIONS the batch filled, which is not its
-            // message count: a row-driven message carries a whole round.
-            let count = self.shaders[kind].setup(&mut builder, batch)?;
-            if count == 0 {
-                continue;
-            }
-            // SAFETY: one invocation per index-table row, rounded up to whole
-            // workgroups; the kernel bounds-checks each against `count`, and every
-            // row within `count` addresses a live slot whose key the batch holds.
-            unsafe {
-                builder
-                    .dispatch([count.div_ceil(GpuAccelerator::LOCAL_SIZE_X), 1, 1])
-                    .map_err(Self::backend)?;
+        let queue = self.gpu.queue();
+        let mut storages = HashSet::new();
+        for (kind, batch) in gpu_batches.iter() {
+            if !batch.is_empty() {
+                storages.extend(self.shaders[kind].storages().iter().copied());
             }
         }
 
@@ -264,18 +270,61 @@ impl Shaders {
         // region no matter how the scopes below are later rearranged.
         let mut retired: Vec<MessageInput> = Vec::new();
 
-        #[cfg(test)]
-        if let Some(f) = &self.fault {
-            f.trip(gpu_batches)?;
-        }
+        let mut attempt = 0;
+        loop {
+            let mut builder = AutoCommandBufferBuilder::primary(
+                self.cmd_allocator.clone(),
+                queue.queue_family_index(),
+                CommandBufferUsage::OneTimeSubmit,
+            )
+            .map_err(Self::backend)?;
 
-        {
+            for (kind, batch) in gpu_batches.iter() {
+                if batch.is_empty() {
+                    continue;
+                }
+                // `setup` reports the INVOCATIONS the batch filled, which is not its
+                // message count: a row-driven message carries a whole round.
+                let count = self.shaders[kind].setup(&mut builder, batch)?;
+                if count == 0 {
+                    continue;
+                }
+                // SAFETY: one invocation per index-table row, rounded up to whole
+                // workgroups; the kernel bounds-checks each against `count`, and every
+                // row within `count` addresses a live slot whose key the batch holds.
+                unsafe {
+                    builder
+                        .dispatch([count.div_ceil(GpuAccelerator::LOCAL_SIZE_X), 1, 1])
+                        .map_err(Self::backend)?;
+                }
+            }
+
+            #[cfg(test)]
+            if attempt == 0
+                && let Some(f) = &self.fault
+            {
+                f.trip(gpu_batches)?;
+            }
+
             let command_buffer = builder.build().map_err(Self::backend)?;
 
             let _guards: Vec<_> = storages
                 .iter()
                 .map(|t| self.world.write_guard(*t))
                 .collect();
+            let grown = gpu_batches
+                .iter()
+                .filter(|(_, batch)| !batch.is_empty())
+                .find_map(|(kind, _)| self.shaders[kind].stale());
+            if let Some(t) = grown {
+                attempt += 1;
+                if attempt > Self::MAX_RERECORD {
+                    return Err(Self::backend(format!(
+                        "world storage {t:?} kept growing while the flush was recorded"
+                    )));
+                }
+                continue;
+            }
             sync::now(self.gpu.device().clone())
                 .then_execute(queue.clone(), command_buffer)
                 .map_err(Self::backend)?
@@ -283,6 +332,7 @@ impl Shaders {
                 .map_err(Self::backend)?
                 .wait(None)
                 .map_err(Self::backend)?;
+            break;
         }
 
         for (kind, batch) in gpu_batches.iter_mut() {
@@ -800,8 +850,10 @@ impl<T: Scalar + StandardPart + PartialOrd + Lift<T> + Pod + Sync + Send + 'stat
         let gpu_batch_size = self.batch_size.unwrap_or(capacity).min(capacity);
         let log_flushes = self.log_flushes;
 
+        let ledger = Arc::new(shaders::Ledger::default());
         let shaders = Shaders {
-            shaders: shaders::all_shaders(w),
+            shaders: shaders::all_shaders(w, &ledger),
+            ledger,
             cmd_allocator: g.cmd_allocator().clone(),
             gpu: g,
             world: w.clone(),
