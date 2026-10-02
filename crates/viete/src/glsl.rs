@@ -64,6 +64,26 @@ pub fn emit_glsl(
     out
 }
 
+/// Fatal slots the emitted kernel writes: the widest `Return.fatals` reachable
+/// from the root. After `flatten` there is exactly one `Return`, and every
+/// invocation writes all of its slots, so this is both the count the host must
+/// scan and the minimum width of the kernel's fatal array.
+///
+/// `Tree::fatal_leaves` is NOT this number: it counts `Fatal` leaf blocks, which
+/// the flatten pass collapses into exactly these status operands.
+pub fn fatal_slots(tree: &Tree) -> usize {
+    fn walk(tree: &Tree, id: BlockId) -> usize {
+        match &tree.blocks[id.0 as usize].term {
+            Term::Return { fatals, .. } => fatals.len(),
+            Term::Branch {
+                on_true, on_false, ..
+            } => walk(tree, *on_true).max(walk(tree, *on_false)),
+            Term::Fatal { .. } => 0,
+        }
+    }
+    walk(tree, tree.root)
+}
+
 fn operand(op: &Operand, inputs_map: &HashMap<u32, String>) -> String {
     match op {
         Operand::Const(i) => format!("c{i}"),
@@ -331,13 +351,19 @@ fn emit_block(
                 out.push_str(&format!("{indent}{lhs} = {rhs};\n"));
             }
             for (i, f) in fats.iter().enumerate() {
-                out.push_str(&format!("{indent}{} = {f};\n", fatal_map[&(i as u32)]));
+                // A fatal operand with no slot to land in would be a silently
+                // dropped division guard. Refuse to emit rather than lose it.
+                let Some(lhs) = fatal_map.get(&(i as u32)) else {
+                    panic!(
+                        "viete: kernel writes {} fatal slot(s) but the boundary maps \
+                         only {}; size the fatal array from `fatal_slots`",
+                        fats.len(),
+                        fatal_map.len()
+                    );
+                };
+                out.push_str(&format!("{indent}{lhs} = {f};\n"));
             }
         }
-        /*
-            Term::Fatal { .. } => {
-                out.push_str(&format!("{indent}error(\"viete: div by zero\")\n"));
-        }*/
         _ => unreachable!(),
     }
 }
@@ -346,6 +372,66 @@ fn emit_block(
 mod tests {
     use super::*;
     use crate::ir::{Block as IrBlock, BlockId, Instr, Operand, Term, Tree};
+
+    /// One `Return` carrying two fatal-status operands, as the flatten pass
+    /// leaves a kernel with two guarded divisions.
+    fn two_fatal_tree() -> Tree {
+        Tree {
+            inputs: 2,
+            params: 0,
+            consts: vec![],
+            blocks: vec![IrBlock {
+                instrs: vec![
+                    Instr::Div(0, Operand::Input(0), Operand::Input(1)),
+                    Instr::Abs(1, Operand::Input(1)),
+                ],
+                term: Term::Return {
+                    outputs: vec![Operand::Instr(0)],
+                    fatals: vec![Operand::Instr(1), Operand::Instr(1)],
+                },
+            }],
+            root: BlockId(0),
+        }
+    }
+
+    fn emit_with_fatal_slots(tree: &Tree, slots: u32) -> String {
+        let inputs: HashMap<u32, String> = [(0, "a".to_string()), (1, "b".to_string())]
+            .into_iter()
+            .collect();
+        let outputs: HashMap<u32, (String, i8)> = [(0, ("o".to_string(), 1))].into_iter().collect();
+        let fatals: HashMap<u32, String> = (0..slots).map(|i| (i, format!("f[{i}]"))).collect();
+        emit_glsl(
+            tree,
+            1e-9,
+            "probe",
+            String::new(),
+            String::new(),
+            &Boundary {
+                inputs: &inputs,
+                outputs: &outputs,
+                fatals: &fatals,
+            },
+        )
+    }
+
+    /// The slot count is read off the `Return`, and a boundary of exactly that
+    /// width receives every operand.
+    #[test]
+    fn fatal_slots_counts_the_return_operands() {
+        let tree = two_fatal_tree();
+        assert_eq!(fatal_slots(&tree), 2);
+        let glsl = emit_with_fatal_slots(&tree, 2);
+        assert!(glsl.contains("f[0] = v1;"), "{glsl}");
+        assert!(glsl.contains("f[1] = v1;"), "{glsl}");
+    }
+
+    /// A boundary narrower than the trace must stop codegen — in `build.rs`,
+    /// that is the build — instead of dropping a division guard.
+    #[test]
+    #[should_panic(expected = "kernel writes 2 fatal slot(s) but the boundary maps only 1")]
+    fn too_few_fatal_slots_refuses_to_emit() {
+        emit_with_fatal_slots(&two_fatal_tree(), 1);
+    }
 
     /// A reduction kernel opens its term loop in `pre` and closes it in
     /// `footer`, so the footer must land after the traced body and still inside

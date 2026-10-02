@@ -16,6 +16,20 @@ use vulkano::{
     pipeline::{ComputePipeline, Pipeline},
 };
 
+/// Fatal slots each generated kernel writes per invocation, one `usize` per
+/// kernel, emitted by `build.rs` from the traces themselves. These are the counts
+/// `check` scans; none is entered by hand.
+mod fatal_counts {
+    include!(concat!(env!("OUT_DIR"), "/fatal_counts.rs"));
+}
+
+/// Declared length of a shader's `Fatals.fatal[]`, read off the struct vulkano
+/// reflects from the compiled SPIR-V. Used for the one hand-written shader,
+/// `simple_sum.glsl`, which has no trace to count and only ever clears its slot.
+const fn fatal_width<F>() -> usize {
+    std::mem::size_of::<F>() / std::mem::size_of::<f32>()
+}
+
 pub(super) mod shader_simple_sum {
     vulkano_shaders::shader! {
         ty: "compute",
@@ -199,6 +213,16 @@ pub(super) trait ShaderSetup: Sync + Send {
     /// Report each message's outcome and RETIRE it, handing the drained inputs
     /// back rather than dropping them.
     ///
+    /// Fatal semantics are MARK-AND-CONTINUE, per message. A kernel never aborts:
+    /// every invocation runs to the end and writes all of its outputs, and a
+    /// tripped division guard only sets that invocation's fatal slot. The host
+    /// then fails exactly the messages whose span holds a set slot, with
+    /// `EvalError::Backend`; every other message in the same dispatch succeeds.
+    /// The outputs a failed message wrote are still in its slots and are garbage
+    /// (an `inf` or `NaN` from the unguarded division) — the caller must not
+    /// consume them. Nothing is rolled back, and nothing else is affected: the
+    /// slots are per invocation and outputs are disjoint per message.
+    ///
     /// The caller owns when they die, and that is load-bearing: a message holds
     /// `WorldKey`s, and dropping the last handle to one reaches into
     /// `World::write` for its storage — the very lock the flush holds while the
@@ -231,6 +255,14 @@ macro_rules! plain_shader {
             set: Arc<DescriptorSet>,
             pipeline: Arc<ComputePipeline>,
         }
+
+        // The host scans `n_fatals` slots of the reflected `Fatals`, so the count
+        // must fit the array the shader declares. `build.rs` sizes both from the
+        // same trace; this holds them together at compile time.
+        const _: () = assert!(
+            $n_fatals <= fatal_width::<$module::Fatals>(),
+            "fatal count exceeds the shader's Fatals array"
+        );
 
         impl $name {
             fn backend(e: impl std::fmt::Display) -> EvalError {
@@ -375,21 +407,33 @@ macro_rules! plain_shader {
                 let fatals = self.fatals.read().unwrap();
                 let mut retired = Vec::with_capacity(batch.len());
                 // Fatals stay per INVOCATION, so a message owns the span it filled
-                // and its outcome is the outcome of any row inside that span.
+                // and its outcome is the outcome of any row inside that span. Only
+                // the first `n_fatals` slots are the trace's; a slot past them is
+                // padding the kernel never writes.
                 let mut at = 0usize;
                 for (input, respond_to) in batch.drain(..) {
                     let MessagePayload::Rows { rows } = &input.payload;
                     let len = rows.len();
                     let fired = fatals[at..at + len]
                         .iter()
-                        .find(|f| f.fatal[0..self.n_fatals].iter().any(|x| *x != 0.0))
-                        .map(|f| f.fatal);
+                        .enumerate()
+                        .find_map(|(row, f)| {
+                            let set: Vec<usize> = f.fatal[..self.n_fatals]
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, x)| **x != 0.0)
+                                .map(|(slot, _)| slot)
+                                .collect();
+                            (!set.is_empty()).then_some((row, set))
+                        });
                     at += len;
                     if let Some(respond_to) = respond_to {
                         let _b = respond_to.send(match fired {
-                            Some(f) => Err(EvalError::Backend {
+                            Some((row, slots)) => Err(EvalError::Backend {
                                 shader: std::any::type_name::<Self>(),
-                                msg: format!("Fatal error during execution: {f:?}"),
+                                msg: format!(
+                                    "fatal slot(s) {slots:?} set at row {row} of this message"
+                                ),
                             }),
                             None => Ok(()),
                         });
@@ -448,26 +492,212 @@ macro_rules! define_shaders {
 pub(super) fn all_shaders(w: &World) -> HashMap<MessageKind, Box<dyn ShaderSetup>> {
     define_shaders!(
         &w;   // <-- pass your context reference here once
-        @row     SimpleSum, shader_simple_sum, EvalSimpleSum, 1, [[u32; 128], f32];
-        @row     CriticallyDampedWarpedPlain, critically_damped_warped_plain, EvalCriticallyDampedWarpedPlain, 1, [[u32; 128], f32, Twist<f32>, Motor<f32>, [Wrench<f32>; 2]];
-        @row     CriticallyDampedWarpedJacobian, critically_damped_warped_jacobian, EvalCriticallyDampedWarpedJacobian, 8, [[u32; 128], f32, Twist<f32>, Motor<f32>, [[Wrench<f32>; 24]; 2], [Wrench<f32>; 2]];
-        @row     PerpendicularDamperWarpedPlain, perpendicular_damper_warped_plain, EvalPerpendicularDamperWarpedPlain, 2, [[u32; 128], f32, Twist<f32>, Motor<f32>, [Wrench<f32>; 2]];
-        @row     PerpendicularDamperWarpedJacobian, perpendicular_damper_warped_jacobian, EvalPerpendicularDamperWarpedJacobian, 8, [[u32; 128], f32, Twist<f32>, Motor<f32>, [[Wrench<f32>; 24]; 2], [Wrench<f32>; 2]];
-        @row     SimpleSpringDamperPlain, simple_spring_damper_plain, EvalSimpleSpringDamperPlain, 1, [[u32; 128], f32, Twist<f32>, Motor<f32>, [Wrench<f32>; 2]];
-        @row     SimpleSpringDamperJacobian, simple_spring_damper_jacobian, EvalSimpleSpringDamperJacobian, 6, [[u32; 128], f32, Twist<f32>, Motor<f32>, [[Wrench<f32>; 24]; 2], [Wrench<f32>; 2]];
-        @row     TorsionalDamperWarpedPlain, torsional_damper_warped_plain, EvalTorsionalDamperWarpedPlain, 0, [[u32; 128], f32, Twist<f32>, Motor<f32>, [Wrench<f32>; 2]];
-        @row     TorsionalDamperWarpedJacobian, torsional_damper_warped_jacobian, EvalTorsionalDamperWarpedJacobian, 2, [[u32; 128], f32, Twist<f32>, Motor<f32>, [[Wrench<f32>; 24]; 2], [Wrench<f32>; 2]];
-        @row Pre, pre_shader, Pre, 0, [[u32; 128], f32, Twist<f32>, Motor<f32>];
+        @row     SimpleSum, shader_simple_sum, EvalSimpleSum, fatal_width::<shader_simple_sum::Fatals>(), [[u32; 128], f32];
+        @row     CriticallyDampedWarpedPlain, critically_damped_warped_plain, EvalCriticallyDampedWarpedPlain, fatal_counts::CRITICALLY_DAMPED_WARPED_PLAIN, [[u32; 128], f32, Twist<f32>, Motor<f32>, [Wrench<f32>; 2]];
+        @row     CriticallyDampedWarpedJacobian, critically_damped_warped_jacobian, EvalCriticallyDampedWarpedJacobian, fatal_counts::CRITICALLY_DAMPED_WARPED_JACOBIAN, [[u32; 128], f32, Twist<f32>, Motor<f32>, [[Wrench<f32>; 24]; 2], [Wrench<f32>; 2]];
+        @row     PerpendicularDamperWarpedPlain, perpendicular_damper_warped_plain, EvalPerpendicularDamperWarpedPlain, fatal_counts::PERPENDICULAR_DAMPER_WARPED_PLAIN, [[u32; 128], f32, Twist<f32>, Motor<f32>, [Wrench<f32>; 2]];
+        @row     PerpendicularDamperWarpedJacobian, perpendicular_damper_warped_jacobian, EvalPerpendicularDamperWarpedJacobian, fatal_counts::PERPENDICULAR_DAMPER_WARPED_JACOBIAN, [[u32; 128], f32, Twist<f32>, Motor<f32>, [[Wrench<f32>; 24]; 2], [Wrench<f32>; 2]];
+        @row     SimpleSpringDamperPlain, simple_spring_damper_plain, EvalSimpleSpringDamperPlain, fatal_counts::SIMPLE_SPRING_DAMPER_PLAIN, [[u32; 128], f32, Twist<f32>, Motor<f32>, [Wrench<f32>; 2]];
+        @row     SimpleSpringDamperJacobian, simple_spring_damper_jacobian, EvalSimpleSpringDamperJacobian, fatal_counts::SIMPLE_SPRING_DAMPER_JACOBIAN, [[u32; 128], f32, Twist<f32>, Motor<f32>, [[Wrench<f32>; 24]; 2], [Wrench<f32>; 2]];
+        @row     TorsionalDamperWarpedPlain, torsional_damper_warped_plain, EvalTorsionalDamperWarpedPlain, fatal_counts::TORSIONAL_DAMPER_WARPED_PLAIN, [[u32; 128], f32, Twist<f32>, Motor<f32>, [Wrench<f32>; 2]];
+        @row     TorsionalDamperWarpedJacobian, torsional_damper_warped_jacobian, EvalTorsionalDamperWarpedJacobian, fatal_counts::TORSIONAL_DAMPER_WARPED_JACOBIAN, [[u32; 128], f32, Twist<f32>, Motor<f32>, [[Wrench<f32>; 24]; 2], [Wrench<f32>; 2]];
+        @row Pre, pre_shader, Pre, fatal_counts::PRE, [[u32; 128], f32, Twist<f32>, Motor<f32>];
         // ROW-driven stages: binding 2 is ALWAYS the row storage, the rest follow.
-        @row Gather, gather_shader, Gather, 0, [[u32; 128], Wrench<f32>, [Wrench<f32>; 2]];
-        @row BlockMatVec, block_matvec_shader, BlockMatVec, 0, [[u32; 128], [[f32; 6]; 6], Wrench<f32>, Twist<f32>];
-        @row Gemm, gemm_shader, Gemm, 0, [[u32; 128], [[f32; 6]; 6]];
-        @row AssembleBlock, assemble_shader, AssembleBlock, 0, [[u32; 128], f32, [[f32; 6]; 6], [[Wrench<f32>; 24]; 2]];
-        @row BlockReduce, block_reduce_shader, BlockReduce, 1, [[u32; 128], [[f32; 6]; 6], f32];
-        @row BlockCopy, block_copy_shader, BlockCopy, 1, [[u32; 128], [[f32; 6]; 6]];
-        @row BodyPostDiagonal, body_post_diagonal_shader, BodyPostDiagonal, 20, [[u32; 128], Motor<f32>, Twist<f32>, Wrench<f32>, [[f32; 6]; 6], [f32; 3], f32];
-        @row BodyPostFull, body_post_full_shader, BodyPostFull, 20, [[u32; 128], Motor<f32>, Twist<f32>, Wrench<f32>, [[f32; 6]; 6], [[f32; 3]; 3], f32];
-        @row BodyPostGatheredDiagonal, body_post_gathered_diagonal_shader, BodyPostGatheredDiagonal, 20, [[u32; 128], Motor<f32>, Twist<f32>, Wrench<f32>, [[f32; 6]; 6], [f32; 3], f32, [Wrench<f32>; 2]];
-        @row BodyPostGatheredFull, body_post_gathered_full_shader, BodyPostGatheredFull, 20, [[u32; 128], Motor<f32>, Twist<f32>, Wrench<f32>, [[f32; 6]; 6], [[f32; 3]; 3], f32, [Wrench<f32>; 2]]
+        @row Gather, gather_shader, Gather, fatal_counts::GATHER, [[u32; 128], Wrench<f32>, [Wrench<f32>; 2]];
+        @row BlockMatVec, block_matvec_shader, BlockMatVec, fatal_counts::BLOCK_MAT_VEC, [[u32; 128], [[f32; 6]; 6], Wrench<f32>, Twist<f32>];
+        @row Gemm, gemm_shader, Gemm, fatal_counts::GEMM, [[u32; 128], [[f32; 6]; 6]];
+        @row AssembleBlock, assemble_shader, AssembleBlock, fatal_counts::ASSEMBLE_BLOCK, [[u32; 128], f32, [[f32; 6]; 6], [[Wrench<f32>; 24]; 2]];
+        @row BlockReduce, block_reduce_shader, BlockReduce, fatal_counts::BLOCK_REDUCE, [[u32; 128], [[f32; 6]; 6], f32];
+        @row BlockCopy, block_copy_shader, BlockCopy, fatal_counts::BLOCK_COPY, [[u32; 128], [[f32; 6]; 6]];
+        @row BodyPostDiagonal, body_post_diagonal_shader, BodyPostDiagonal, fatal_counts::BODY_POST_DIAGONAL, [[u32; 128], Motor<f32>, Twist<f32>, Wrench<f32>, [[f32; 6]; 6], [f32; 3], f32];
+        @row BodyPostFull, body_post_full_shader, BodyPostFull, fatal_counts::BODY_POST_FULL, [[u32; 128], Motor<f32>, Twist<f32>, Wrench<f32>, [[f32; 6]; 6], [[f32; 3]; 3], f32];
+        @row BodyPostGatheredDiagonal, body_post_gathered_diagonal_shader, BodyPostGatheredDiagonal, fatal_counts::BODY_POST_GATHERED_DIAGONAL, [[u32; 128], Motor<f32>, Twist<f32>, Wrench<f32>, [[f32; 6]; 6], [f32; 3], f32, [Wrench<f32>; 2]];
+        @row BodyPostGatheredFull, body_post_gathered_full_shader, BodyPostGatheredFull, fatal_counts::BODY_POST_GATHERED_FULL, [[u32; 128], Motor<f32>, Twist<f32>, Wrench<f32>, [[f32; 6]; 6], [[f32; 3]; 3], f32, [Wrench<f32>; 2]]
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::rows::fixed::{JointRow, bake_joints};
+    use super::super::{
+        MessageInput, MessageKind, MessagePayload, Pending, PendingByKind, Shaders,
+    };
+    use super::*;
+    use aristotle::{Epoch, WorldId, WorldKey};
+    use clifford::pga3::Dynamics;
+    use joints::{AxialSpringDamper, JointEdge, SimpleSpringDamper};
+    use peano::prelude::*;
+
+    const DT: f32 = 1.0 / 60.0;
+    const WARP: f32 = 1.0;
+    /// Sentinel the fatal connection's value slot starts at, so the test can see
+    /// that the kernel overwrote it rather than skipping the store.
+    const UNTOUCHED: f32 = 123.0;
+
+    /// One `SimpleSpringDamper` connection between two bodies at the identity
+    /// pose, at rest, with anchor `b` on body B (anchor `a` is the origin). With
+    /// `b` at the origin and no softening the anchors coincide, `√(d² + ε²)` is
+    /// exactly zero, and the kernel's division guard trips.
+    fn connection(
+        world: &Arc<World>,
+        b: [f32; 3],
+        softening: f32,
+    ) -> (JointEdge<f32>, JointRow<f32>) {
+        let joint = AxialSpringDamper::builder(world.clone(), SimpleSpringDamper)
+            .b(Vector3::from(b))
+            .rest(0.5)
+            .stiffness(10.0)
+            .damping(1.0)
+            .softening(softening)
+            .build();
+        let edge = JointEdge::new(WorldId::get(), WorldId::get(), joint);
+        let vels = {
+            let mut map = world.write::<Twist<f32>>();
+            [map.add(Twist::zero()), map.add(Twist::zero())]
+        };
+        let poses = {
+            let mut map = world.write::<Motor<f32>>();
+            [map.add(Motor::identity()), map.add(Motor::identity())]
+        };
+        let row = JointRow {
+            vels,
+            poses,
+            conn: edge.wrench_key(),
+            block: edge.jacobian_key(),
+            params: edge.params_keys(),
+        };
+        (edge, row)
+    }
+
+    /// Bake `rows` into one message of `kind`, returning it with the receiver
+    /// its outcome is reported on.
+    fn message(
+        world: &Arc<World>,
+        kind: MessageKind,
+        rows: &[JointRow<f32>],
+        dt: &WorldKey<f32>,
+        warp: &WorldKey<f32>,
+        jacobian: bool,
+    ) -> (Pending, oneshot::Receiver<Result<(), EvalError>>) {
+        let mut rounds = bake_joints(world, rows, dt, warp, jacobian);
+        assert_eq!(rounds.len(), 1, "connection rows are one round");
+        let (tx, rx) = oneshot::channel();
+        let input = MessageInput {
+            kind,
+            payload: MessagePayload::Rows {
+                rows: rounds.pop().unwrap(),
+            },
+        };
+        ((input, Some(tx)), rx)
+    }
+
+    /// Drive one connection kernel into its division guard and check the
+    /// mark-and-continue contract: three messages go out in ONE dispatch — two
+    /// healthy rows, the degenerate row, one healthy row — and only the middle
+    /// one fails, with `EvalError::Backend`. Its outputs are still written; its
+    /// batch-mates on either side succeed and match the CPU force law.
+    fn fatal_fails_only_its_own_message(kind: MessageKind, jacobian: bool) {
+        let world = Arc::new(World::builder().usual::<f32>());
+        let g = world.gpu();
+        let shaders = Shaders {
+            shaders: all_shaders(&world),
+            cmd_allocator: g.cmd_allocator().clone(),
+            gpu: g.clone(),
+            world: world.clone(),
+        };
+        let (dt, warp) = {
+            let mut map = world.write::<f32>();
+            (map.add(DT), map.add(WARP))
+        };
+
+        let (h0, r0) = connection(&world, [1.0, 0.0, 0.0], 0.0);
+        let (h1, r1) = connection(&world, [0.0, 2.0, 0.0], 0.0);
+        let (bad, rb) = connection(&world, [0.0, 0.0, 0.0], 0.0);
+        let (h2, r2) = connection(&world, [0.0, 0.0, -1.5], 0.0);
+        bad.wrench_key().write(
+            [Wrench::new(
+                &Vector3::from([UNTOUCHED; 3]),
+                &Vector3::from([UNTOUCHED; 3]),
+            ); 2],
+        );
+
+        let (m0, rx0) = message(&world, kind, &[r0, r1], &dt, &warp, jacobian);
+        let (mb, rxb) = message(&world, kind, &[rb], &dt, &warp, jacobian);
+        let (m2, rx2) = message(&world, kind, &[r2], &dt, &warp, jacobian);
+        let mut batches: PendingByKind = HashMap::new();
+        batches.insert(kind, vec![m0, mb, m2]);
+        shaders.dispatch(&mut batches).unwrap();
+
+        let outcome = |mut rx: oneshot::Receiver<Result<(), EvalError>>| {
+            rx.try_recv()
+                .expect("sender dropped without an outcome")
+                .expect("check reported no outcome")
+        };
+        let (o0, ob, o2) = (outcome(rx0), outcome(rxb), outcome(rx2));
+        assert!(
+            o0.is_ok(),
+            "healthy message before the fatal one failed: {o0:?}"
+        );
+        assert!(
+            o2.is_ok(),
+            "healthy message after the fatal one failed: {o2:?}"
+        );
+        match ob {
+            Err(EvalError::Backend { msg, .. }) => {
+                assert!(
+                    msg.contains("row 0"),
+                    "fatal reported at the wrong row: {msg}"
+                );
+            }
+            other => panic!("degenerate connection did not fail with Backend: {other:?}"),
+        }
+
+        // Mark-and-continue: the failed message's outputs were still stored.
+        let written = bad.wrench_key().read();
+        assert!(
+            written
+                .iter()
+                .flat_map(|w| w.force().split().into_iter().chain(w.torque().split()))
+                .all(|c| c != UNTOUCHED),
+            "fatal invocation skipped its stores: {written:?}"
+        );
+
+        // The healthy connections computed the force law, not garbage.
+        let epoch = Epoch::standalone(DT, WARP);
+        let poses = vector![Motor::identity(), Motor::identity()];
+        let vels = vector![Twist::zero(), Twist::zero()];
+        for edge in [&h0, &h1, &h2] {
+            let want = edge.eval::<f32>(&poses, &vels, &epoch);
+            let got = edge.wrench_key().read();
+            for end in 0..2 {
+                let (w, g) = (want[end], got[end]);
+                let pairs = w
+                    .force()
+                    .split()
+                    .into_iter()
+                    .zip(g.force().split())
+                    .chain(w.torque().split().into_iter().zip(g.torque().split()));
+                for (w, g) in pairs {
+                    assert!(
+                        g.is_finite() && (w - g).abs() <= 1e-4 * w.abs().max(1.0),
+                        "end {end}: cpu {w} vs gpu {g}"
+                    );
+                }
+            }
+            assert!(
+                got[0].force().split().iter().any(|c| c.abs() > 1.0),
+                "healthy connection produced no force: {got:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn plain_kernel_fatal_fails_only_its_own_message() {
+        fatal_fails_only_its_own_message(MessageKind::EvalSimpleSpringDamperPlain, false);
+    }
+
+    #[test]
+    fn jacobian_kernel_fatal_fails_only_its_own_message() {
+        fatal_fails_only_its_own_message(MessageKind::EvalSimpleSpringDamperJacobian, true);
+    }
 }
