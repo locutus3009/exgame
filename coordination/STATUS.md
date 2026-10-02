@@ -5,7 +5,7 @@
 
 ## Portfolio overview
 
-**8 ARs tracked** across 1 active status categories.
+**16 ARs tracked** across 2 active status categories.
 
 | Status | Meaning | Count |
 | --- | --- | ---: |
@@ -13,7 +13,7 @@
 | **In review** | Submitted by its worker, awaiting a coordinator decision | 0 |
 | **Open** | Dependency-ready and available to claim | 0 |
 | **Blocked** | Cannot proceed until its recorded blocker clears | 0 |
-| **Planned** | Defined work awaiting promotion or dependencies | 0 |
+| **Planned** | Defined work awaiting promotion or dependencies | 8 |
 | **Future** | Deferred roadmap work | 0 |
 | **Done** | Accepted, integrated, and durably verified | 8 |
 | **Cancelled** | Stopped with a recorded rationale | 0 |
@@ -38,6 +38,17 @@ flowchart LR
         AR_0107["AR-0107 - Done"]:::status_done
         AR_0108["AR-0108 - Done"]:::status_done
     end
+    subgraph series_02["02 - Physics you can trust, and a first place to fly"]
+        direction TB
+        AR_0201["AR-0201 - Planned"]:::status_planned
+        AR_0202["AR-0202 - Planned"]:::status_planned
+        AR_0203["AR-0203 - Planned"]:::status_planned
+        AR_0204["AR-0204 - Planned"]:::status_planned
+        AR_0205["AR-0205 - Planned"]:::status_planned
+        AR_0206["AR-0206 - Planned"]:::status_planned
+        AR_0207["AR-0207 - Planned"]:::status_planned
+        AR_0208["AR-0208 - Planned"]:::status_planned
+    end
     AR_0101 --> AR_0102
     AR_0101 --> AR_0108
     AR_0102 --> AR_0103
@@ -49,6 +60,17 @@ flowchart LR
     AR_0106 --> AR_0101
     AR_0106 --> AR_0108
     AR_0107 --> AR_0108
+    AR_0201 --> AR_0205
+    AR_0201 --> AR_0206
+    AR_0202 --> AR_0206
+    AR_0203 --> AR_0206
+    AR_0203 --> AR_0207
+    AR_0204 --> AR_0206
+    AR_0204 --> AR_0208
+    AR_0205 --> AR_0206
+    AR_0207 --> AR_0206
+    AR_0207 --> AR_0208
+    AR_0208 --> AR_0206
     classDef status_in_progress fill:#1565c0,color:#ffffff,stroke:#263238,stroke-width:2px
     classDef status_in_review fill:#ad1457,color:#ffffff,stroke:#263238,stroke-width:2px
     classDef status_open fill:#2e7d32,color:#ffffff,stroke:#263238,stroke-width:2px
@@ -72,8 +94,29 @@ flowchart LR
 | [AR-0106](tasks/AR-0106.md) | None | [AR-0101](tasks/AR-0101.md), [AR-0108](tasks/AR-0108.md) |
 | [AR-0107](tasks/AR-0107.md) | None | [AR-0108](tasks/AR-0108.md) |
 | [AR-0108](tasks/AR-0108.md) | [AR-0101](tasks/AR-0101.md), [AR-0102](tasks/AR-0102.md), [AR-0103](tasks/AR-0103.md), [AR-0104](tasks/AR-0104.md), [AR-0105](tasks/AR-0105.md), [AR-0106](tasks/AR-0106.md), [AR-0107](tasks/AR-0107.md) | None |
+| [AR-0201](tasks/AR-0201.md) | None | [AR-0205](tasks/AR-0205.md), [AR-0206](tasks/AR-0206.md) |
+| [AR-0202](tasks/AR-0202.md) | None | [AR-0206](tasks/AR-0206.md) |
+| [AR-0203](tasks/AR-0203.md) | None | [AR-0206](tasks/AR-0206.md), [AR-0207](tasks/AR-0207.md) |
+| [AR-0204](tasks/AR-0204.md) | None | [AR-0206](tasks/AR-0206.md), [AR-0208](tasks/AR-0208.md) |
+| [AR-0205](tasks/AR-0205.md) | [AR-0201](tasks/AR-0201.md) | [AR-0206](tasks/AR-0206.md) |
+| [AR-0206](tasks/AR-0206.md) | [AR-0201](tasks/AR-0201.md), [AR-0202](tasks/AR-0202.md), [AR-0203](tasks/AR-0203.md), [AR-0204](tasks/AR-0204.md), [AR-0205](tasks/AR-0205.md), [AR-0207](tasks/AR-0207.md), [AR-0208](tasks/AR-0208.md) | None |
+| [AR-0207](tasks/AR-0207.md) | [AR-0203](tasks/AR-0203.md) | [AR-0206](tasks/AR-0206.md), [AR-0208](tasks/AR-0208.md) |
+| [AR-0208](tasks/AR-0208.md) | [AR-0204](tasks/AR-0204.md), [AR-0207](tasks/AR-0207.md) | [AR-0206](tasks/AR-0206.md) |
 
 ## Complete AR inventory
+
+### Planned (8)
+
+| Priority | AR | Owner | Summary | Next action |
+| --- | --- | --- | --- | --- |
+| P0 | [AR-0201](tasks/AR-0201.md): GPU-versus-CPU differential oracle for every generated kernel | Unclaimed | No test checks that the GPU computes what each kernel&#x27;s CPU source says. Run every generated kernel kind on the GPU and on its CPU source over seeded inputs and assert agreement per kind. | Claim; list every MessageKind and its CPU source (joints laws, functions crate stages), then build the harness for one joint kind end to end before widening. |
+| P0 | [AR-0202](tasks/AR-0202.md): Conservation property tests: momentum, angular momentum, energy drift | Unclaimed | No test would catch an integrator that conserves nothing. Bound momentum and angular-momentum drift for free jointed mechanisms and energy drift for conservative springs, per integrator. | Claim; pick the smallest free mechanism (two bodies, one spring) and measure drift for each integrator before writing any bound. |
+| P1 | [AR-0203](tasks/AR-0203.md): Analytic orbit checks: Kepler two-body period, eccentricity, apsides | Unclaimed | The game is an N-body gravity simulation, yet no test compares an orbit with its closed form. Integrate a Kepler two-body orbit through the gravity propagator and check period, eccentricity and apsides. | Claim; read crates/newton/src/gravity.rs to find how a two-body system is set up, then measure one circular orbit before eccentric ones. |
+| P1 | [AR-0204](tasks/AR-0204.md): Place a body at the island anchor&#x27;s full precision | Unclaimed | AR-0107 measured that bodies enter as absolute f32 poses, so at 1e6-1e9 the position is rounded before the fixed-point island anchor applies. Add a construction path that keeps full precision. | Claim; read crates/newton/tests/precision_seam.rs and how islands pick their anchor, then propose the API in an evidence note before implementing. |
+| P1 | [AR-0207](tasks/AR-0207.md): A first physically consistent configuration of the star system | Unclaimed | The owner&#x27;s setting sketch (G-class star, Saturn-class giant, habitable moon) has no physical configuration yet. Design a first one and show the engine keeps it stable over many orbits. | Claim after AR-0203 lands; read docs/architecture/planned/setting.md and setting-patera.md, then write the proposed parameter table as an evidence note before coding. |
+| P1 | [AR-0208](tasks/AR-0208.md): A ship you can fly: thrust and attitude control in the star system | Unclaimed | Nothing in the tree can be played. Add a ship body with thrust and attitude control in the AR-0207 system, a headless scripted-burn scenario test, and a melies example a person can fly. | Claim after AR-0207 and AR-0204 land; read crates/melies (app.rs, the Example trait) and how forces enter a mechanism, then propose the control interface in an evidence note. |
+| P2 | [AR-0205](tasks/AR-0205.md): Fatal coverage for BodyPost and a typed EvalError::Fatal | Unclaimed | BodyPost kernels trace zero fatal slots although Motor::inverse divides, so a degenerate motor is never flagged; and EvalError::Fatal exists but nothing produces it. Close both. | Claim after AR-0201 lands (its oracle protects the kernel change); find why the BodyPost trace drops the inverse&#x27;s division guard. |
+| P3 | [AR-0206](tasks/AR-0206.md): Close the documentation drift M1 and M2 leave behind | Unclaimed | docs/QUALITY.md still lists the FIXME: deadlock? sites and the physics checks as deferred, and hitchcock test comments still blame a Lua backend. Bring the documents in line with M1 and M2. | Claim after every other M2 AR is done; grep docs/ and crates/ for claims M1 and M2 made false. |
 
 ### Done (8)
 
