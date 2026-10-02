@@ -16,7 +16,7 @@ mod mechanism;
 
 pub use component::{Component, Entity, Inert};
 pub use force_field::ForceField;
-pub use mechanism::Mechanism;
+pub use mechanism::{Mechanism, StructureError};
 
 // ============================================================================
 // Integration tests of the whole mechanism
