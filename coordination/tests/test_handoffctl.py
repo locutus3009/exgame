@@ -1007,6 +1007,9 @@ class HandoffTest(unittest.TestCase):
                 stdout = "main\n"
             elif "status --porcelain" in joined and str(product) in joined:
                 stdout = " M file\n"
+            elif "rev-list -1" in joined:
+                # No product-changing commit found: product_head falls back to rev-parse.
+                returncode = 128
             elif "rev-list" in joined and str(product) in joined:
                 stdout = "1 2\n"
             elif "rev-list" in joined:
@@ -3596,8 +3599,9 @@ class HandoffTest(unittest.TestCase):
         )
 
 
-class StateBranchGuardTest(unittest.TestCase):
-    """The guard against a real repository, since its whole job is to read real Git state."""
+class RealRepositoryTest(unittest.TestCase):
+    """The state-branch guard and product heads, against a real repository: reading real Git
+    state is their whole job, so a mocked ``run`` would test only the mock."""
 
     def setUp(self) -> None:
         self.temp = TemporaryDirectory()
@@ -3614,6 +3618,53 @@ class StateBranchGuardTest(unittest.TestCase):
     def tearDown(self) -> None:
         CORE.ROOT = self.saved_root
         self.temp.cleanup()
+
+    def commit(self, relative: str, text: str) -> str:
+        """Write one file, commit it unsigned, and return the new head."""
+        target = self.repo / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
+        git = ["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid"]
+        CORE.run([*git, "-C", str(self.repo), "add", "--", relative])
+        CORE.run([*git, "-C", str(self.repo), "commit", "-q", "--no-gpg-sign", "-m", relative])
+        return str(CORE.run(["git", "-C", str(self.repo), "rev-parse", "HEAD"]).stdout.strip())
+
+    def test_product_head_skips_commits_that_touch_only_coordination(self) -> None:
+        product = self.commit("src/lib.rs", "fn main() {}\n")
+        state = self.commit("coordination/STATUS.md", "generated\n")
+        self.assertNotEqual(product, state)
+        self.assertEqual(product, CORE.product_head(self.repo, "HEAD"))
+        # The view it feeds is therefore unchanged by the commit that records it.
+        self.commit("coordination/CURRENT.md", "generated\n")
+        self.assertEqual(product, CORE.product_head(self.repo, "HEAD"))
+        self.assertEqual(product, CORE.product_head(self.repo / "coordination", "HEAD"))
+
+    def test_product_head_keeps_a_merge_on_the_first_parent_line(self) -> None:
+        git = ["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid"]
+        CORE.run(["git", "-C", str(self.repo), "switch", "-q", "-c", "feature/x"])
+        self.commit("src/lib.rs", "fn main() {}\n")
+        CORE.run(["git", "-C", str(self.repo), "switch", "-q", "main"])
+        CORE.run(
+            [
+                *git,
+                "-C",
+                str(self.repo),
+                "merge",
+                "-q",
+                "--no-ff",
+                "--no-gpg-sign",
+                "-m",
+                "merge",
+                "feature/x",
+            ]
+        )
+        merge = CORE.run(["git", "-C", str(self.repo), "rev-parse", "HEAD"]).stdout.strip()
+        self.commit("coordination/STATUS.md", "generated\n")
+        self.assertEqual(merge, CORE.product_head(self.repo, "HEAD"))
+
+    def test_product_head_reports_an_unknown_ref_as_given(self) -> None:
+        unknown = "f" * 40
+        self.assertEqual(unknown, CORE.product_head(self.repo, unknown))
 
     def test_canonical_checkout_on_main_passes(self) -> None:
         CORE.require_state_branch()
