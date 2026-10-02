@@ -3,13 +3,18 @@
 This file is generated. Read `README.md`, then use `tools/handoffctl snapshot`.
 Never edit this file directly.
 
+## Open
+
+| Priority | Task | Summary | Next action | Owner |
+| --- | --- | --- | --- | --- |
+| P1 | [AR-0203](tasks/AR-0203.md): Analytic orbit checks: Kepler two-body period, eccentricity, apsides | The game is an N-body gravity simulation, yet no test compares an orbit with its closed form. Integrate a Kepler two-body orbit through the gravity propagator and check period, eccentricity and apsides. | Claim; read crates/newton/src/gravity.rs to find how a two-body system is set up, then measure one circular orbit before eccentric ones. | - |
+
 ## Planned
 
 | Priority | Task | Summary | Next action | Owner |
 | --- | --- | --- | --- | --- |
 | P0 | [AR-0201](tasks/AR-0201.md): GPU-versus-CPU differential oracle for every generated kernel | No test checks that the GPU computes what each kernel's CPU source says. Run every generated kernel kind on the GPU and on its CPU source over seeded inputs and assert agreement per kind. | Claim; list every MessageKind and its CPU source (joints laws, functions crate stages), then build the harness for one joint kind end to end before widening. | - |
 | P0 | [AR-0202](tasks/AR-0202.md): Conservation property tests: momentum, angular momentum, energy drift | No test would catch an integrator that conserves nothing. Bound momentum and angular-momentum drift for free jointed mechanisms and energy drift for conservative springs, per integrator. | Claim; pick the smallest free mechanism (two bodies, one spring) and measure drift for each integrator before writing any bound. | - |
-| P1 | [AR-0203](tasks/AR-0203.md): Analytic orbit checks: Kepler two-body period, eccentricity, apsides | The game is an N-body gravity simulation, yet no test compares an orbit with its closed form. Integrate a Kepler two-body orbit through the gravity propagator and check period, eccentricity and apsides. | Claim; read crates/newton/src/gravity.rs to find how a two-body system is set up, then measure one circular orbit before eccentric ones. | - |
 | P1 | [AR-0204](tasks/AR-0204.md): Place a body at the island anchor's full precision | AR-0107 measured that bodies enter as absolute f32 poses, so at 1e6-1e9 the position is rounded before the fixed-point island anchor applies. Add a construction path that keeps full precision. | Claim; read crates/newton/tests/precision_seam.rs and how islands pick their anchor, then propose the API in an evidence note before implementing. | - |
 | P1 | [AR-0207](tasks/AR-0207.md): A first physically consistent configuration of the star system | The owner's setting sketch (G-class star, Saturn-class giant, habitable moon) has no physical configuration yet. Design a first one and show the engine keeps it stable over many orbits. | Claim after AR-0203 lands; read docs/architecture/planned/setting.md and setting-patera.md, then write the proposed parameter table as an evidence note before coding. | - |
 | P1 | [AR-0208](tasks/AR-0208.md): A ship you can fly: thrust and attitude control in the star system | Nothing in the tree can be played. Add a ship body with thrust and attitude control in the AR-0207 system, a headless scripted-burn scenario test, and a melies example a person can fly. | Claim after AR-0207 and AR-0204 land; read crates/melies (app.rs, the Example trait) and how forces enter a mechanism, then propose the control interface in an evidence note. | - |
