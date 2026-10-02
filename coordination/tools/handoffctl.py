@@ -353,9 +353,22 @@ def product_checkout(settings: Meta) -> Path:
     return Path(top)
 
 
+# What a state transaction writes, relative to ROOT. The coordinator's own code, schemas, tests
+# and documents are product work reviewed through pull requests, and are deliberately absent.
+STATE_PATHS = (
+    "tasks",
+    "plans",
+    "milestones",
+    "CURRENT.md",
+    "STATUS.md",
+    "PROJECT_STATE.md",
+    "WORKTREES.md",
+)
+
+
 def product_paths() -> tuple[str, ...]:
     """Return a pathspec for everything in the repository except the coordination state."""
-    return (":(top)", f":(top,exclude){ROOT.name}")
+    return (":(top)", *(f":(top,exclude){ROOT.name}/{name}" for name in STATE_PATHS))
 
 
 def product_head(repo: Path, ref: str) -> str:
@@ -363,7 +376,7 @@ def product_head(repo: Path, ref: str) -> str:
 
     State shares the repository, so every reconcile commit moves ``HEAD`` and ``origin/main``.
     A view that recorded the raw tip would be stale the moment it was committed, and ``doctor
-    --live`` could never pass. Commits that touch only ``coordination/`` are skipped instead;
+    --live`` could never pass. Commits that touch only ``STATE_PATHS`` are skipped instead;
     the first-parent line keeps a merge, rather than the branch commit beneath it, as the head.
     A ref this checkout cannot resolve -- a remote tip not yet fetched -- is reported as given,
     so the view stays stale until a fetch makes it comparable.
@@ -470,7 +483,7 @@ def live_docs(state: State) -> tuple[str, str]:
         "# Game Experiment live project state",
         "",
         "Generated from local Git and GitHub. Do not edit. Heads are the newest commit that",
-        "changed anything outside `coordination/`, so state commits do not move them.",
+        "changed anything but coordination state, so state commits do not move them.",
         "",
         f"- Product remote main: `{state['remote_main']}`",
         f"- Local origin/main: `{state['origin_main']}`",
@@ -509,7 +522,7 @@ def live_docs(state: State) -> tuple[str, str]:
         "# Game Experiment worktree inventory",
         "",
         "Generated from live Git. Paths are privacy-safe worktree keys. Heads and counts skip",
-        "commits that touch only `coordination/`.",
+        "commits that touch only coordination state.",
         "",
         "| Worktree | Branch | Head | Dirty | vs origin/main |",
         "| --- | --- | --- | ---: | --- |",
