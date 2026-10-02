@@ -9,9 +9,9 @@
 
 | Status | Meaning | Count |
 | --- | --- | ---: |
-| **In progress** | Claimed work with a live lease | 0 |
+| **In progress** | Claimed work with a live lease | 1 |
 | **In review** | Submitted by its worker, awaiting a coordinator decision | 0 |
-| **Open** | Dependency-ready and available to claim | 1 |
+| **Open** | Dependency-ready and available to claim | 0 |
 | **Blocked** | Cannot proceed until its recorded blocker clears | 0 |
 | **Planned** | Defined work awaiting promotion or dependencies | 7 |
 | **Future** | Deferred roadmap work | 0 |
@@ -42,7 +42,7 @@ flowchart LR
         direction TB
         AR_0201["AR-0201 - Planned"]:::status_planned
         AR_0202["AR-0202 - Planned"]:::status_planned
-        AR_0203["AR-0203 - Open"]:::status_open
+        AR_0203["AR-0203 - In progress"]:::status_in_progress
         AR_0204["AR-0204 - Planned"]:::status_planned
         AR_0205["AR-0205 - Planned"]:::status_planned
         AR_0206["AR-0206 - Planned"]:::status_planned
@@ -105,11 +105,11 @@ flowchart LR
 
 ## Complete AR inventory
 
-### Open (1)
+### In progress (1)
 
 | Priority | AR | Owner | Summary | Next action |
 | --- | --- | --- | --- | --- |
-| P1 | [AR-0203](tasks/AR-0203.md): Analytic orbit checks: Kepler two-body period, eccentricity, apsides | Unclaimed | The game is an N-body gravity simulation, yet no test compares an orbit with its closed form. Integrate a Kepler two-body orbit through the gravity propagator and check period, eccentricity and apsides. | Claim; read crates/newton/src/gravity.rs to find how a two-body system is set up, then measure one circular orbit before eccentric ones. |
+| P1 | [AR-0203](tasks/AR-0203.md): Analytic orbit checks: Kepler two-body period, eccentricity, apsides | worker-ar0203 | The game is an N-body gravity simulation, yet no test compares an orbit with its closed form. Integrate a Kepler two-body orbit through the gravity propagator and check period, eccentricity and apsides. | Claim; read crates/newton/src/gravity.rs to find how a two-body system is set up, then measure one circular orbit before eccentric ones. |
 
 ### Planned (7)
 

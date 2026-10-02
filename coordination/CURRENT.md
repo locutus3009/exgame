@@ -3,11 +3,11 @@
 This file is generated. Read `README.md`, then use `tools/handoffctl snapshot`.
 Never edit this file directly.
 
-## Open
+## In Progress
 
 | Priority | Task | Summary | Next action | Owner |
 | --- | --- | --- | --- | --- |
-| P1 | [AR-0203](tasks/AR-0203.md): Analytic orbit checks: Kepler two-body period, eccentricity, apsides | The game is an N-body gravity simulation, yet no test compares an orbit with its closed form. Integrate a Kepler two-body orbit through the gravity propagator and check period, eccentricity and apsides. | Claim; read crates/newton/src/gravity.rs to find how a two-body system is set up, then measure one circular orbit before eccentric ones. | - |
+| P1 | [AR-0203](tasks/AR-0203.md): Analytic orbit checks: Kepler two-body period, eccentricity, apsides | The game is an N-body gravity simulation, yet no test compares an orbit with its closed form. Integrate a Kepler two-body orbit through the gravity propagator and check period, eccentricity and apsides. | Claim; read crates/newton/src/gravity.rs to find how a two-body system is set up, then measure one circular orbit before eccentric ones. | worker-ar0203 |
 
 ## Planned
 
