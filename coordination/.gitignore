@@ -1,0 +1,12 @@
+# Private runtime configuration and the coordinator lock; never tracked.
+.runtime/
+# Worker worktrees of this repository; working space, not a record.
+workspaces/
+private-archive/
+__pycache__/
+*.pyc
+.venv/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/locutus3009/exgame/coordination/schema/milestone-schema.json",
+  "title": "Game Experiment milestone",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "label", "status"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "id": {"type": "string", "pattern": "^M(0|[1-9][0-9]?)$"},
+    "label": {"type": "string", "minLength": 1, "maxLength": 80, "pattern": "\\S"},
+    "status": {"enum": ["active", "complete"]}
+  }
+}

@@ -146,4 +146,8 @@ today. Do not describe a gate as running until it does.
   its governance rules. Its crate table now agrees with the one above; both were checked against
   `cargo metadata --no-deps`.
 - **Accelerator:** [ACCELERATOR.md](ACCELERATOR.md).
+- **Coordination:** [coordination/README.md](coordination/README.md) — tasks, milestones and the
+  `handoffctl` tool, in-tree since the project was published; the retired M0 series (AR-0001 to
+  AR-0018, cited throughout `docs/`) is recorded in
+  [coordination/HISTORY.md](coordination/HISTORY.md).
 - **Design-review protocol:** [docs/process/design-review-method.md](docs/process/design-review-method.md).

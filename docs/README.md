@@ -49,7 +49,8 @@ governance rules require before a `decided/` document changes — the owner valu
 and it is kept unchanged — and [resume-bookmark.md](process/resume-bookmark.md), which the
 governance rules point a returning reader at. The bookmark went ten weeks without an edit while
 the code moved under it, so its session log is now an explicitly-dated archive with its falsified
-claims named, and its live half points at the coordination repository, where a task has an owner,
+claims named, and its live half points at the coordination state in [`coordination/`](../coordination/README.md),
+where a task has an owner,
 a lease and recorded evidence — an identity outside the session that wrote it, which is exactly
 what the bookmark never had.
 
@@ -113,6 +114,15 @@ Tidying it would have produced a second corpus with the same missing mechanism. 
 were migrated instead — the three `findings/` notes the governed documents link, and the three
 specs in `records/` that live source or `ACCELERATOR.md` cites — and the other 75 were deleted
 in one commit whose message carries the numbers above.
+
+### 6. `coordination/` — task state and the coordinator (authoritative for who is doing what)
+
+Milestones, numbered tasks with owners, leases and evidence logs, their plans, and the
+`handoffctl` tool that writes them, under [../coordination/](../coordination/README.md). It used
+to be a separate repository and moved in-tree when the project was published; the task set
+restarted from empty, and [HISTORY.md](../coordination/HISTORY.md) records the retired M0
+series that other documents still cite by AR number. Generated views there (`STATUS.md`,
+`CURRENT.md`, `PROJECT_STATE.md`, `WORKTREES.md`) are never edited by hand.
 
 ## The rule that prevents recurrence
 

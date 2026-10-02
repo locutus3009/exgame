@@ -7,7 +7,7 @@ after a break, so this file stays; what changed is what it is allowed to claim.
 ## Current — where to resume
 
 **This file is no longer the record of where work stopped.** That record now
-lives in the coordination repository, in numbered tasks with owners, leases,
+lives in [`coordination/`](../../coordination/README.md), in numbered tasks with owners, leases,
 plans and recorded evidence. An artifact there has an identity outside the
 session that produced it, which is the property this file never had: it was
 written at the end of a session, by that session, and nothing obliged the next
@@ -17,7 +17,7 @@ shipped in a different form.
 
 To resume design work:
 
-1. Read the coordination repository's task list for what is claimed, in
+1. Read the coordination task list (`coordination/STATUS.md`) for what is claimed, in
    progress and blocked. That is the authoritative answer to "where did work
    stop".
 2. Pick a thread from [open/](../architecture/open/) — the live design questions

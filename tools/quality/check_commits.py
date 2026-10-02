@@ -25,8 +25,7 @@ commit:
    coordinator's partial list.
 
 This is not the coordinator's `handoffctl check-commits`. That command performs
-no signature and no sign-off checking, and hardcodes the coordinator repository
-as its git root, so from a product worktree it examines the wrong history.
+no signature and no sign-off checking; it is a message-privacy scan only.
 
 Nothing hooks this into `git push`. It is a gate the runner invokes and a
 reviewer reads.
