@@ -159,7 +159,8 @@ enum Message {
 }
 
 /// The producers of the epoch being driven, as the worker and the producers
-/// see them (ACCELERATOR.md Part II, the quiescence backstop).
+/// see them: the quiescence backstop that flushes once every registered
+/// producer is parked.
 ///
 /// `active` counts the producers registered for the epoch that have not
 /// finished; `parked` counts those whose last poll returned `Pending`. When
@@ -541,12 +542,14 @@ impl FaultInjector {
     }
 }
 
-// The `Accelerator` + async-dispatch design — the executor model (why the whole
-// integrator goes async, one accelerator fed index records, heuristic/quiescence
-// flush, await-per-block), result write-back by partitioned ownership, the
-// structural-vs-data lock split, and the `GpuVec<T>` shared-memory storage — all
-// lives in `/ACCELERATOR.md` (Parts II–IV). Kept out of source comments so the
-// design is not lost.
+// The `Accelerator` + async-dispatch design: the whole integrator is async, and
+// one shared accelerator is fed index records by every mechanism of an epoch
+// (`Driver`). It flushes when a batch is full or at quiescence, and each producer
+// awaits its own block. Results are written back in place into world storage by
+// partitioned ownership: each slot has at most one writer per flush, which the
+// `Ledger` pre-pass in `shaders.rs` enforces. Structural changes take the world's
+// structural write guard; per-type storage grows under it, and the worker
+// rebinds its descriptor sets when a storage generation changes.
 //
 // Every kernel runs on the GPU from a worker thread that owns the compiled
 // pipelines and the batch tables; the handle below holds only the channel, the
@@ -572,7 +575,7 @@ pub struct Accelerator<T: Scalar + StandardPart + PartialOrd + Lift<T> + Pod> {
 
 /// Configures an [`Accelerator`]. Every knob changes only TIMING — how messages
 /// pack into flushes and how far producers may run ahead — never the result of
-/// any kernel (ACCELERATOR.md Part V, the determinism invariant).
+/// any kernel (the determinism invariant; `tests/ar0104_batch_determinism.rs`).
 pub struct AcceleratorBuilder<T> {
     world: Arc<World>,
     batch_size: Option<usize>,
@@ -656,7 +659,7 @@ impl<T: Scalar + StandardPart + PartialOrd + Lift<T> + Pod> Accelerator<T> {
         self.eval_joints(lane, jacobian).await?;
         // Phase 3 — GATHER (per body): `total_wrench = external + Sum` incident
         // connection wrenches. Outputs are disjoint; the deterministic reduction
-        // order lives in the term order inside the row (ACCELERATOR.md §6).
+        // order lives in the term order inside the row (segmented, padded to max).
         //
         // Skipped when the caller follows with the FUSED post, which sums the same
         // terms inside its own invocation and never materialises `total_wrench`.

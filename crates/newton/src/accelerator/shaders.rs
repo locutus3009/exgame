@@ -324,7 +324,8 @@ struct LedgerState {
     claimed: Vec<(TypeId, Claimed)>,
 }
 
-/// The one-writer-per-slot check (ACCELERATOR.md Part III), shared by every
+/// The one-writer-per-slot check (the soundness invariant of world storage's
+/// device door, see `aristotle::world`), shared by every
 /// kind of one accelerator because a flush spans kinds.
 ///
 /// `Shaders::dispatch` runs it as a PRE-PASS: it opens the flush with

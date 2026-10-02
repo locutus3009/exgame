@@ -4,11 +4,49 @@
 //! joint type's constraint law once (over `viete::Sym`) into a branch-enumerated
 //! IR and emits one GLSL kernel per type (compiled to SPIR-V by shaderc).
 //!
-//! The full architecture — evaluation-point contract, the zero-value pose-seed
-//! collapse, GPU codegen shape, typed batching, the segmented gather stage, the
-//! implicit PRE/POST stages, and every open question — lives in `/ACCELERATOR.md`
-//! (Part I). The kernel I/O layout is documented in its appendix. Kept out of
-//! source comments so the design is not lost.
+//! The kernel I/O layout below is authoritative: the constants `NIN`,
+//! `NOUT_FULL` and `NOUT_PLAIN`, the input map and the `*_output_map`
+//! functions in this file implement it, and the host-side readers in
+//! `src/accelerator/` consume it. (It moved here from the retired
+//! `ACCELERATOR` subsystem document in M1.)
+//!
+//! # Kernel I/O layout (authoritative)
+//!
+//! **Input** (`NIN = 30`). The pose perturbation is a pure differential (value 0 —
+//! the finite pose lives in `base`), so pose-twist DOF carry NO input values; only
+//! their 12 AD gradient axes exist. The AD gradient-axis layout is the FIXED newton
+//! 24-order (pose A 0..6, pose B 6..12, vel A 12..18, vel B 18..24) and is
+//! independent of these value-input indices; velocity value j feeds gradient axis
+//! 12+j.
+//!
+//! ```text
+//! 0..12   velocity values (vel A 0..6, vel B 6..12)  → gradient axes 12..24
+//! 12..20  base pose of body A: 8 even-grade Motor components
+//! 20..28  base pose of body B: 8 even-grade Motor components
+//! 28      dt
+//! 29      warp
+//! ```
+//!
+//! The pose retraction is `base ∘ Motor::exp(δ)` — the **same** map
+//! `Differential::jacobian` uses, so there is NO exp-"time"/`half` input (a `Twist::exp`
+//! would bake the geometric half-angle ½ and halve every pose column — the
+//! kernel-vs-`Differential` oracle pins this). The `−½dt²/−½dt` column scaling lives
+//! in newton's matrix assembler, not the kernel.
+//!
+//! **Output** (`NOUT_FULL = 300`) — 12 wrench components × 25 slots. Components in
+//! order (body A's wrench, then body B's — force x,y,z then torque x,y,z each):
+//!
+//! ```text
+//! [0]=A.fx [1]=A.fy [2]=A.fz [3]=A.tx [4]=A.ty [5]=A.tz
+//! [6]=B.fx [7]=B.fy [8]=B.fz [9]=B.tx [10]=B.ty [11]=B.tz
+//! ```
+//!
+//! Component c occupies `out[c*25 .. c*25+25] = [value, ∂/∂axis0 … ∂/∂axis23]`, the
+//! 24 partials along the fixed gradient-axis order above. Explicit reads only the
+//! value slot of each component (`out[c*25]`); implicit reads the whole 25-wide
+//! group.
+//!
+//! # Structure of this file
 //!
 //! Two kernels are generated per joint type, plus the per-body `Pre` stage, and
 //! they share almost all of their GPU-boundary plumbing. The common pieces live
@@ -51,10 +89,10 @@ use viete::{InputFact, InputRef, Sym, Tracer};
 // Input layout, NIN = 30 (velocity values, two base poses, dt/warp). The pose
 // perturbation uses UNIT retraction (exp-time = 1, matching `Differential`), so
 // there is no `half`/`factor` input — the −½dt²/−½dt column scaling lives in the
-// matrix assembler (see ACCELERATOR.md §V). Authoritative table: appendix.
+// matrix assembler. Authoritative table: the module doc above.
 const NIN: usize = 30;
 // Output layout, NOUT = 300: 12 wrench components × 25 (value + 24 partials).
-// Authoritative table: /ACCELERATOR.md appendix.
+// Authoritative table: the module doc above.
 const NOUT_FULL: usize = 300;
 // Plain (value-only) output: just the 12 wrench components, no partials. Used by
 // the no-Jacobian connection kernel (explicit families / the residual value pass).
@@ -245,8 +283,8 @@ fn fatal_map(fatals: usize) -> HashMap<u32, String> {
 }
 
 /// The four input facts every joint kernel traces under: dt is `AbsGtEps` and
-/// positive, warp is `AbsGeOne` and positive (ACCELERATOR.md, engine input
-/// invariants).
+/// positive, warp is `AbsGeOne` and positive (the engine's input invariants:
+/// it never dispatches a non-positive dt or a warp below one).
 fn input_facts() -> [(InputRef, InputFact); 4] {
     [
         (InputRef::Input(28), InputFact::AbsGtEps), // dt
@@ -671,7 +709,7 @@ where
     // 6-DOF pose perturbation (value 0, gradient axes 0..12); base carries the
     // finite pose. There is no exp-"time": Motor::exp is the unit retraction, and
     // the −½dt²/−½dt column scaling is applied by newton.rs's matrix assembler,
-    // NOT baked here (ACCELERATOR.md §V). Explicit drives base = actual pose.
+    // NOT baked here. Explicit drives base = actual pose.
     let pose_a = base(12).compose(&Motor::exp(&Twist::new(
         &Vector3::from([dvar(0), dvar(1), dvar(2)]),
         &Vector3::from([dvar(3), dvar(4), dvar(5)]),
@@ -989,8 +1027,8 @@ fn pre_output_map() -> HashMap<u32, (String, i8)> {
         .collect()
 }
 
-/// Emit `Pre.glsl` — the per-body PRE stage of every dispatch (ACCELERATOR.md
-/// §6, phase 1), value-only like `generate_plain` but over one body instead of a
+/// Emit `Pre.glsl` — the per-body PRE stage of every dispatch (phase 1 of
+/// the implicit step), value-only like `generate_plain` but over one body instead of a
 /// connection.
 ///
 /// Traced under NO input facts: unlike the connection kernels this one never

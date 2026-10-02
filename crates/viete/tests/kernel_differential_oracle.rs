@@ -2,7 +2,7 @@
 
 #![cfg(feature = "lua")]
 
-//! Cross-oracle (ACCELERATOR.md §V gate): the build.rs joint kernel construction
+//! Cross-oracle (the kernel-vs-`Differential` gate): the build.rs joint kernel construction
 //! — `pose = base ∘ exp(δ)`, δ value 0, UNIT retraction — traced through viete and
 //! run, must agree with a direct CPU `Differential::jacobian` at the same
 //! (base pose, velocity) point.

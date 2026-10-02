@@ -87,7 +87,7 @@ struct RawMap {
     //     the device is in, and a `grow` cannot swap the buffer under it.
     // What the guard cannot order is the device against ITSELF: invocations of
     // one flush run unordered, so the door is sound only while each slot has at
-    // most one writer per flush (ACCELERATOR.md Part III). Newton checks that
+    // most one writer per flush. Newton checks that
     // before submitting (`accelerator/shaders.rs`, `Ledger`) and refuses a
     // flush whose rows name one output slot twice.
     values: Box<dyn AnyVec>,
@@ -556,7 +556,7 @@ impl WorldBuilder {
             .with_storage::<Motor<T>>()
             .with_storage::<Twist<T>>()
             // Per-connection accelerator outputs: the value pair [wrench on a, on b]
-            // and the 24-column Jacobian block. See newton's Accelerator / ACCELERATOR.md §I.
+            // and the 24-column Jacobian block. See newton's `Accelerator`.
             .with_storage::<[Wrench<T>; 2]>()
             .with_storage::<[[Wrench<T>; 24]; 2]>()
             // One 6×6 block of the implicit solver's system matrix. The matrix is

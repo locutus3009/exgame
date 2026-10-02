@@ -43,7 +43,7 @@ pub struct RigidBody<T: Scalar + Pod> {
     pub accum_wrench: WorldKey<Wrench<T>>,
     /// Per-body OUTPUT of the gather: total world wrench = external + Σ joint forces at
     /// the current iterate. `enqueue` accumulates here; the integrator reads it when assembling
-    /// the residual / in an explicit step. A CPU stand-in for the future GPU gather (ACCELERATOR §I.6).
+    /// the residual / in an explicit step. A CPU stand-in for the future GPU gather (the segmented gather stage).
     pub total_wrench: WorldKey<Wrench<T>>,
     /// Long-lived incidence cache: the joint contributions summed into
     /// `total_wrench` (gather phase 3). Rebuilt ONLY on a topology change of the

@@ -5,7 +5,7 @@
 > because a live doc comment in `crates/joints/src/axial_spring_damper/critically_damped_warped.rs`
 > cites it as the explanation for the moving-target handling in production. It is history, not
 > obligation: its `Status:` line records what was true when it was written, and
-> where it disagrees with the code or with [ACCELERATOR.md](../../../ACCELERATOR.md),
+> where it disagrees with the code or with `ACCELERATOR` (the accelerator design document, retired in M1),
 > they win.
 
 Date: 2026-06-01

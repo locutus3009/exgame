@@ -2,16 +2,16 @@
 
 > **Migrated design record.** This document was written under the previous
 > process and lived in `docs/superpowers/specs/`, which was deleted. It was kept
-> because [ACCELERATOR.md](../../../ACCELERATOR.md) cites it for the storage contract's
+> because `ACCELERATOR` (the accelerator design document, retired in M1) cites it for the storage contract's
 > rationale — the two aliasing bugs that produced it — which that document does not
 > itself carry. It is history, not
 > obligation: its `Status:` line records what was true when it was written, and
-> where it disagrees with the code or with [ACCELERATOR.md](../../../ACCELERATOR.md),
+> where it disagrees with the code or with `ACCELERATOR` (the accelerator design document, retired in M1),
 > they win.
 
 Date: 2026-07-19
 Status: design approved, pending implementation
-Related: [`/ACCELERATOR.md`](../../../ACCELERATOR.md) (Parts I–V)
+Related: `/ACCELERATOR` (retired in M1) (Parts I–V)
 
 ## Problem
 
@@ -206,7 +206,7 @@ pass filling the slots; residual and matrix then read the slots.
 per-connection value buffer + segmented gather, PRE/POST as separate GPU stages,
 fatal stream, `GpuVec`, coherency, quiescence flush.
 
-## ACCELERATOR.md updates
+## ACCELERATOR updates (document retired in M1)
 
 - Appendix: `NIN 31 → 30`; remove input 30 (`half`/`factor`); note pose
   perturbation is unit retraction.

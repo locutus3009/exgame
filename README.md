@@ -97,7 +97,8 @@ done before the project was published and why the task set restarted from empty.
   integrated. Read it before changing anything.
 - [docs/QUALITY.md](docs/QUALITY.md) — what is enforced and, just as importantly, what is not.
 - [docs/README.md](docs/README.md) — which documentation system is authoritative and why.
-- [ACCELERATOR.md](ACCELERATOR.md) — the GPU subsystem in detail.
+- [CLAUDE.md](CLAUDE.md#the-accelerator) — the GPU subsystem and the invariants it enforces
+  (its former design document was retired in M1; the code's module docs describe it).
 - [docs/architecture/overview.md](docs/architecture/overview.md) — the design index.
 - [coordination/README.md](coordination/README.md) — the task coordinator: milestones, tasks,
   leases and the transitions between them.

@@ -187,7 +187,7 @@ inside an island:
    the integrator step; the world→body pullback also moved INSIDE the integrator, not here.)
 4. **integrate:** `integrator.step_all(bodies, joints, wrenches, epoch)` — coupled
    implicit integration of the WHOLE island through `Accelerator` (PRE → conn kernels →
-   gather; see `ACCELERATOR.md`). World-frame residual assembly
+   gather; see the module doc of `crates/newton/src/accelerator/mod.rs`). World-frame residual assembly
    ([decided/frame-convention](../decided/frame-convention.md)).
 5. **re-anchor origin to the COM** (`Island::recompute_centroid`), then
    `field.publish` (BACK buffer) and publication of the `centroid`/`centroid_velocity`

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-//! The precision seam between the world position and the f32 kernels (ACCELERATOR.md Part V).
+//! The precision seam between the world position and the f32 kernels (formerly an open question, resolved in M1).
 //!
 //! The kernels read base-pose Motors as `f32`. The open question was whether the translation
 //! part of a base pose survives narrowing to an `f32` shader input when the mechanism sits far

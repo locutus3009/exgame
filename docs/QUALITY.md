@@ -95,12 +95,13 @@ Deferred to **M1 and later**:
   [README.md](../README.md).
 - **Criterion performance budgets for the accelerator.** `[profile.bench]` is configured for
   comparable numbers, but no budget is asserted and no regression fails anything.
-- **Structurally enforcing the world-storage writer invariant.** The world storage rests on
-  `unsafe` blocks that are sound only under an "at most one writer per slot" invariant which is
-  today maintained by convention and reasoning, not by a type or a runtime check. The milestone
-  records this as the highest-consequence open risk in the repository and the leading candidate
-  to open M1. It is named here, unenforced, on purpose: an unenforced invariant that everyone
-  knows about is survivable, and one that is quietly assumed is not.
+- **Structurally enforcing the world-storage writer invariant.** Since M1 (AR-0102, AR-0103) the
+  "at most one writer per slot" invariant is **enforced at runtime**: the accelerator's `Ledger`
+  pre-pass refuses any flush whose rows name one output slot twice (`EvalError::Backend`), and
+  mechanism structure is frozen within an epoch (`StructureError::EpochInProgress`,
+  `StructureError::AlreadyOwned`). What remains unenforced is the *structural* form: no type
+  makes a second writer unrepresentable, so a violation is caught at dispatch, not at compile
+  time.
 
 Also deferred, and tracked outside this document: the two `FIXME: deadlock?` sites in the
 implicit solver together with their ignored reproducers.
